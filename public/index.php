@@ -6,22 +6,37 @@ if (!function_exists('e')) {
   function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 }
 
-/* KPIs globales */
-$tot_controles = (int)$pdo->query("
-  SELECT COUNT(*) c
-  FROM items i
-  JOIN documentos d ON d.id = i.documento_id
-  JOIN areas a ON a.id = d.area_id
-")->fetch()['c'];
+/* ===== KPIs (leen de checklist) ===== */
+$tot_controles = (int)($pdo->query("
+  SELECT COUNT(*) FROM checklist
+")->fetchColumn() ?: 0);
 
-$tot_cumplidos = (int)$pdo->query("
-  SELECT COUNT(DISTINCT r.item_id) c
-  FROM respuestas r
-  WHERE r.estado = 'si'
-")->fetch()['c'];
+$tot_cumplidos = (int)($pdo->query("
+  SELECT COUNT(*) FROM checklist
+  WHERE estado = 'si'
+")->fetchColumn() ?: 0);
 
 $tot_pend = max(0, $tot_controles - $tot_cumplidos);
 $porc = $tot_controles ? round($tot_cumplidos * 100.0 / $tot_controles, 1) : 0;
+
+/* (Opcional) KPIs por S1–S4 si después querés mostrar por área */
+$areas_stats = [];
+foreach (['S1','S2','S3','S4'] as $ax) {
+  $stTot = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE file_rel LIKE ?");
+  $stTot->execute(["storage/listas_control/{$ax}/%"]);
+  $cnt = (int)($stTot->fetchColumn() ?: 0);
+
+  $stOk = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE estado='si' AND file_rel LIKE ?");
+  $stOk->execute(["storage/listas_control/{$ax}/%"]);
+  $cum = (int)($stOk->fetchColumn() ?: 0);
+
+  $areas_stats[$ax] = [
+    'controles'  => $cnt,
+    'cumplidos'  => $cum,
+    'pendientes' => max(0, $cnt - $cum),
+    'porc'       => $cnt ? round($cum * 100.0 / $cnt, 1) : 0,
+  ];
+}
 
 /* URLs Grafana (ejemplo) */
 $grafana_global = 'http://localhost:3000/d/xxxxx/inspeccion?orgId=1&viewPanel=1&kiosk';
@@ -45,6 +60,13 @@ ui_header('Dashboard de Inspección', ['container'=>'xl', 'show_brand'=>true]);
 
   <div class="d-flex align-items-center justify-content-between mb-3">
     <h1 class="m-0" style="font-weight:900;">Dashboard de Inspección</h1>
+
+    <?php if (!empty($_GET['saved'])): ?>
+      <div class="alert alert-success py-2" style="border-radius:10px">
+        ✔ Datos guardados. Panel actualizado.
+      </div>
+    <?php endif; ?>
+
     <div class="d-flex gap-2">
       <a class="btn btn-sm btn-acc" href="documentos.php">Ver documentos por área</a>
     </div>

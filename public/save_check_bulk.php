@@ -9,9 +9,12 @@ $file_rel = nvl($_POST['file_rel'] ?? '');
 $sheet    = (int)($_POST['sheet'] ?? 0);
 $showc    = nvl($_POST['showcolor'] ?? '');
 
-if($file_rel===''){ http_response_code(400); exit('Falta file_rel'); }
+if ($file_rel === '') {
+  http_response_code(400);
+  exit('Falta file_rel');
+}
 
-// aseguro tabla
+/* Tabla (si no existe) */
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   id INT AUTO_INCREMENT PRIMARY KEY,
   file_rel VARCHAR(512) NOT NULL,
@@ -21,13 +24,13 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   evidencia_path VARCHAR(512) NULL,
   updated_at TIMESTAMP NULL,
   UNIQUE KEY uq_file_row (file_rel,row_idx)
-)");
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
 $sel = $pdo->prepare("SELECT evidencia_path FROM checklist WHERE file_rel=? AND row_idx=?");
 $ins = $pdo->prepare("INSERT INTO checklist(file_rel,row_idx,estado,observacion,evidencia_path,updated_at) VALUES(?,?,?,?,?,NOW())");
 $upd = $pdo->prepare("UPDATE checklist SET estado=?, observacion=?, evidencia_path=?, updated_at=NOW() WHERE file_rel=? AND row_idx=?");
 
-// carpeta evidencia
+/* Carpeta de evidencias */
 $base = realpath(__DIR__ . '/..');
 $evDirAbs = $base . '/storage/evidencias';
 if(!is_dir($evDirAbs)) mkdir($evDirAbs, 0777, true);
@@ -36,31 +39,56 @@ $estados = $_POST['estado'] ?? [];
 $observ  = $_POST['observacion'] ?? [];
 $files   = $_FILES['evidencia'] ?? null;
 
-foreach($estados as $idxStr => $estado){
-  $idx = (int)$idxStr; if($idx<=0) continue;
+/* Transacción por consistencia */
+$pdo->beginTransaction();
 
-  $obs = nvl($observ[$idxStr] ?? '');
+try {
+  foreach($estados as $idxStr => $estado){
+    $idx = (int)$idxStr; 
+    if($idx<=0) continue;
 
-  $sel->execute([$file_rel,$idx]); $prev = $sel->fetchColumn();
-  $evPath = $prev ?: null;
+    $obs = nvl($observ[$idxStr] ?? '');
 
-  if($files && isset($files['name'][$idxStr]) && $files['error'][$idxStr]===UPLOAD_ERR_OK){
-    $tmp=$files['tmp_name'][$idxStr]; $name=$files['name'][$idxStr];
-    $ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));
-    if(in_array($ext,['jpg','jpeg','png','pdf','webp'])){
-      $fname='ev_'.md5($file_rel.'|'.$idx.'|'.microtime(true)).'.'.$ext;
-      $dest=$evDirAbs.'/'.$fname;
-      if(@move_uploaded_file($tmp,$dest)){
-        $evPath = rel_path().'/'.$fname; // storage/evidencias/...
+    $sel->execute([$file_rel,$idx]); 
+    $prev = $sel->fetchColumn();      // false si no hay fila
+    $evPath = $prev ?: null;
+
+    /* Evidencia (si subieron) */
+    if($files 
+       && isset($files['name'][$idxStr]) 
+       && isset($files['error'][$idxStr]) 
+       && $files['error'][$idxStr]===UPLOAD_ERR_OK)
+    {
+      $tmp  = $files['tmp_name'][$idxStr];
+      $name = $files['name'][$idxStr];
+      $ext  = strtolower(pathinfo($name,PATHINFO_EXTENSION));
+
+      if(in_array($ext,['jpg','jpeg','png','pdf','webp'])){
+        $fname='ev_'.md5($file_rel.'|'.$idx.'|'.microtime(true)).'.'.$ext;
+        $dest=$evDirAbs.'/'.$fname;
+        if(@move_uploaded_file($tmp,$dest)){
+          $evPath = rel_path().'/'.$fname; // storage/evidencias/...
+        }
       }
+    }
+
+    /* Insert/Update */
+    if($prev===false){
+      $ins->execute([$file_rel,$idx,$estado?:null,$obs?:null,$evPath]);
+    }else{
+      $upd->execute([$estado?:null,$obs?:null,$evPath,$file_rel,$idx]);
     }
   }
 
-  if($prev===false){ $ins->execute([$file_rel,$idx,$estado?:null,$obs?:null,$evPath]); }
-  else { $upd->execute([$estado?:null,$obs?:null,$evPath,$file_rel,$idx]); }
-}
+  $pdo->commit();
 
-$qs = 'p='.rawurlencode($file_rel).'&s='.$sheet.'&saved=1';
-if($showc==='1') $qs.='&showcolor=1';
-header('Location: ver_tabla.php?'.$qs);
-exit;
+  /* Al terminar OK → volvemos al dashboard */
+  header('Location: index.php?saved=1');
+  exit;
+
+} catch(Throwable $e){
+  $pdo->rollBack();
+  http_response_code(500);
+  echo "Error al guardar: ".$e->getMessage();
+  exit;
+}

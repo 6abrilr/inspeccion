@@ -35,15 +35,6 @@ if(isset($_GET['setmode'])){
 $stM = $pdo->prepare("SELECT mode_num_is FROM xlsx_prefs WHERE file_rel=?");
 $stM->execute([$rel]); $mode = $stM->fetchColumn() ?: 'item';
 
-/* ====== PDF hermano (mismo nombre, misma carpeta) ====== */
-function url_path($path){
-  return implode('/', array_map('rawurlencode', explode('/', $path)));
-}
-$pdfAbs    = preg_replace('/\.(xlsx|csv)$/i', '.pdf', $abs);
-$pdfRel    = preg_replace('/\.(xlsx|csv)$/i', '.pdf', $rel);
-$pdfExists = is_file($pdfAbs);
-$pdfHref   = $pdfExists ? ('../' . url_path($pdfRel)) : '';
-
 /* Autoload PhpSpreadsheet */
 $autoload = $projectBase . '/vendor/autoload.php';
 $ssAvail = is_file($autoload);
@@ -95,16 +86,12 @@ if(!isset($errFatal) && $ext==='xlsx'){
     if(!$found) return [1,1,0,0];
     while($maxR>=$minR){
       $empty=true;
-      for($c=$minC;$c<=$maxC;$c++){
-        if(trim(cell_text($sh->getCell(coord($c,$maxR))))!==''){ $empty=false; break; }
-      }
+      for($c=$minC;$c<=$maxC;$c++){ if(trim(cell_text($sh->getCell(coord($c,$maxR))))!==''){ $empty=false; break; } }
       if($empty) $maxR--; else break;
     }
     while($maxC>=$minC){
       $empty=true;
-      for($r=$minR;$r<=$maxR;$r++){
-        if(trim(cell_text($sh->getCell(coord($maxC,$r))))!==''){ $empty=false; break; }
-      }
+      for($r=$minR;$r<=$maxR;$r++){ if(trim(cell_text($sh->getCell(coord($maxC,$r))))!==''){ $empty=false; break; } }
       if($empty) $maxC--; else break;
     }
     return [$minR,$minC,$maxR,$maxC];
@@ -191,10 +178,14 @@ if(!$headers){
 
 /* === Mostrar solo 2 columnas de contenido (Col1 + Col2 “Inspecciones”) === */
 $MAX_TEXT_COLS = 2;
+
+// Aseguro encabezados mínimos y renombro Col2
 $headers = array_values($headers);
 $headers = array_pad($headers, $MAX_TEXT_COLS, '');
 $headers = array_slice($headers, 0, $MAX_TEXT_COLS);
 if (isset($headers[1])) $headers[1] = 'Inspecciones';
+
+// Recorto/padeo cada fila a esas 2 columnas
 foreach ($rows as $i => $r) {
   $r = array_values($r);
   $r = array_pad($r, $MAX_TEXT_COLS, '');
@@ -226,6 +217,10 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
 $sel = $pdo->prepare("SELECT row_idx, estado, observacion, evidencia_path FROM checklist WHERE file_rel=?");
 $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_idx']]=$r; }
 
+/* PDF al lado del Excel (mismo nombre, .pdf) */
+$pdf_abs = preg_replace('/\.(xlsx|csv)$/i', '.pdf', $abs);
+$pdf_rel = preg_replace('/\.(xlsx|csv)$/i', '.pdf', $rel);
+$pdf_exists = is_file($pdf_abs);
 ?>
 <!doctype html>
 <html lang="es">
@@ -235,7 +230,7 @@ $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_i
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
-  /* Paleta oscura + acento verde */
+  /* Paleta oscura + acento */
   body{
     background: radial-gradient(1200px 600px at 10% -10%, #151922 0, transparent 40%), #0f1117;
     color:#e9eef5;
@@ -243,39 +238,30 @@ $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_i
     margin:0; padding:16px;
   }
   .box{background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1); border-radius:16px; padding:12px; backdrop-filter:blur(6px)}
-  .btn-acc{background:#16a34a;border:none;color:#fff;border-radius:12px;font-weight:800;padding:.45rem .9rem}
+  .toolbar .btn{ border-radius:10px; font-weight:700; padding:.35rem .7rem; }
+  .btn-acc{background:#16a34a; border:none; color:#fff}
   .btn-acc:hover{background:#22c55e}
-  .btn-acc-sm{font-size:.85rem;padding:.32rem .56rem;border-radius:10px}
-  .toolbar{gap:.5rem;flex-wrap:wrap}
+  .btn-ghost{background:transparent; border:1px solid rgba(255,255,255,.2); color:#e9eef5}
+  .btn-ghost:hover{background:rgba(255,255,255,.08)}
+  .btn-danger-ghost{border-color:#ef4444; color:#fecaca}
+  .btn-danger-ghost:hover{background:rgba(239,68,68,.15)}
 
-  /* ==== Tabla: que el contenido mande ===== */
+  /* Tabla */
   table{ width:100%; border-collapse:collapse; table-layout:auto; }
   th,td{
     padding:10px; border-bottom:1px solid rgba(255,255,255,.12); vertical-align:top;
-    white-space:normal;
-    overflow-wrap:anywhere;
+    white-space:normal; overflow-wrap:anywhere;
   }
-
-  /* Encabezado fijo */
   thead th{
     position:sticky; top:0; z-index:5;
     background:#11151d; color:#e9eef5;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
     font-weight:800; letter-spacing:.04em; text-transform:uppercase;
   }
-
-  /* Columna # */
-  thead th:nth-child(1), tbody td:nth-child(1){ width:56px }
-
-  /* Estado / Obs / Evidencia (ancho controlado) */
-  thead th:nth-last-child(3), tbody td:nth-last-child(3){ width:160px } /* Estado */
-  thead th:nth-last-child(2), tbody td:nth-last-child(2){ width:340px } /* Observación */
-  thead th:nth-last-child(1), tbody td:nth-last-child(1){ width:280px } /* Evidencia */
-
-  /* Columnas de texto */
-  tbody td:not(:first-child):not(:nth-last-child(3)):not(:nth-last-child(2)):not(:last-child){
-    min-width:360px;
-  }
+  /* Anchos de columnas de control */
+  thead th:nth-last-child(3), tbody td:nth-last-child(3){ width:150px } /* Estado */
+  thead th:nth-last-child(2), tbody td:nth-last-child(2){ width:320px } /* Observación */
+  thead th:nth-last-child(1), tbody td:nth-last-child(1){ width:260px } /* Evidencia */
 
   .section{background:rgba(34,197,94,.10); font-weight:800}
   .muted{color:#cfd6ff99}
@@ -286,41 +272,50 @@ $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_i
     border:1px solid rgba(255,255,255,.18); border-radius:8px; padding:.35rem .5rem
   }
   input[type="file"]{ width:100% }
+
+  /* Overlay spinner al guardar */
+  #overlay{
+    position:fixed; inset:0; background:rgba(0,0,0,.55);
+    display:none; align-items:center; justify-content:center; z-index:9999;
+    backdrop-filter: blur(2px);
+  }
+  #overlay.show{ display:flex; }
+  .spinner{
+    width:72px; height:72px; border-radius:50%;
+    border:6px solid rgba(255,255,255,.2);
+    border-top-color:#16a34a; animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to{ transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 
-<div class="mb-2 d-flex align-items-center toolbar">
-  <a class="btn btn-acc btn-acc-sm" href="documentos.php">← Volver</a>
+<!-- Overlay bloqueo -->
+<div id="overlay" aria-hidden="true">
+  <div class="spinner" role="status" aria-label="Guardando..."></div>
+</div>
 
-  <span class="muted" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-    <?= e($rel) ?>
-  </span>
-
-  <span class="ms-2">Modo números: <b><?= $mode==='item'?'Ítem':'Título' ?></b></span>
-
-  <a class="btn btn-acc btn-acc-sm" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>&setmode=title<?= $debugShowColor?'&showcolor=1':'' ?>">Nro como TÍTULO</a>
-  <a class="btn btn-acc btn-acc-sm" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>&setmode=item<?= $debugShowColor?'&showcolor=1':'' ?>">Nro como ÍTEM</a>
-
-  <?php if(!$debugShowColor): ?>
-    <a class="btn btn-acc btn-acc-sm" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>&showcolor=1">Ver con color (debug)</a>
-  <?php else: ?>
-    <a class="btn btn-acc btn-acc-sm" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>">Ocultar color</a>
-  <?php endif; ?>
-
-  <?php if ($pdfExists): ?>
-    <a class="btn btn-acc btn-acc-sm" target="_blank" href="<?= e($pdfHref) ?>">Abrir PDF</a>
-  <?php else: ?>
-    <button class="btn btn-acc btn-acc-sm" title="Colocá el PDF con el mismo nombre al lado del XLSX" disabled>PDF no disponible</button>
-  <?php endif; ?>
-
-  <div class="ms-auto">
-    <form action="save_check_bulk.php" method="post" enctype="multipart/form-data">
-      <input type="hidden" name="file_rel" value="<?= e($rel) ?>">
-      <input type="hidden" name="sheet" value="<?= (int)$sheetIdx ?>">
-      <input type="hidden" name="showcolor" value="<?= $debugShowColor?'1':'0' ?>">
-      <button class="btn btn-acc btn-acc-sm">Guardar todo</button>
-    </form>
+<div class="d-flex align-items-center justify-content-between toolbar mb-2">
+  <div class="d-flex align-items-center gap-2">
+    <a class="btn btn-ghost" href="documentos.php">← Volver</a>
+    <span class="muted small"><?= e($rel) ?></span>
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <span class="small">Modo números:</span>
+    <a class="btn btn-ghost" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>&setmode=title<?= $debugShowColor?'&showcolor=1':'' ?>">Nro como TÍTULO</a>
+    <a class="btn btn-ghost" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>&setmode=item<?= $debugShowColor?'&showcolor=1':'' ?>">Nro como ÍTEM</a>
+    <?php if(!$debugShowColor): ?>
+      <a class="btn btn-ghost" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>&showcolor=1">Ver color (debug)</a>
+    <?php else: ?>
+      <a class="btn btn-ghost btn-danger-ghost" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>">Ocultar color</a>
+    <?php endif; ?>
+    <?php if($pdf_exists): ?>
+      <a class="btn btn-ghost" target="_blank" href="../<?= e($pdf_rel) ?>">Abrir PDF</a>
+    <?php else: ?>
+      <button class="btn btn-ghost" disabled title="No encontré PDF junto al Excel">Abrir PDF</button>
+    <?php endif; ?>
+    <!-- Guardar todo (único) -->
+    <button form="bulkForm" class="btn btn-acc">Guardar todo</button>
   </div>
 </div>
 
@@ -341,7 +336,8 @@ $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_i
   }
 ?>
 
-<form action="save_check_bulk.php" method="post" enctype="multipart/form-data" class="box">
+<form id="bulkForm" action="save_check_bulk.php" method="post" enctype="multipart/form-data" class="box">
+  <!-- Importante: estos hidden NO deben deshabilitarse -->
   <input type="hidden" name="file_rel" value="<?= e($rel) ?>">
   <input type="hidden" name="sheet" value="<?= (int)$sheetIdx ?>">
   <input type="hidden" name="showcolor" value="<?= $debugShowColor?'1':'0' ?>">
@@ -350,7 +346,6 @@ $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_i
     <table>
       <thead>
         <tr>
-          <th>#</th>
           <?php foreach($headers as $h): ?><th><?= e($h) ?></th><?php endforeach; ?>
           <th>Estado</th>
           <th>Observación</th>
@@ -359,7 +354,7 @@ $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_i
       </thead>
       <tbody>
       <?php
-        $rowIndex=1;
+        $rowIndex=1; // índice interno (no se muestra)
         foreach($rows as $i=>$r){
           if(!$debugShowColor && !empty($rowFill[$i])) continue;
 
@@ -367,7 +362,7 @@ $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_i
           if(is_title_row($r,$mode)){
             $title=trim(($r[0]??'').' '.($r[1]??''));
             if($title==='') $title=trim((string)($r[1]??''));
-            echo '<tr class="section"><td>'.$rowIndex.'</td><td colspan="'.count($headers).'">'.e($title).'</td><td colspan="3"></td></tr>';
+            echo '<tr class="section"><td colspan="'.count($headers).'">'.e($title).'</td><td colspan="3"></td></tr>';
             $rowIndex++; continue;
           }
 
@@ -377,28 +372,52 @@ $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_i
           $ev  = $saved['evidencia_path'] ?? '';
 
           echo '<tr>';
-          echo '<td>'.$rowIndex.'</td>';
           foreach($r as $v){ echo '<td>'.e($v).'</td>'; }
-          echo '<td><select name="estado['.$rowIndex.']"><option value="" '.($est===''?'selected':'').'>—</option><option value="si" '.($est==='si'?'selected':'').'>Sí</option><option value="no" '.($est==='no'?'selected':'').'>No</option></select></td>';
-          echo '<td><input type="text" name="observacion['.$rowIndex.']" value="'.e($obs).'" placeholder="Escribir..."></td>';
-          echo '<td><input type="file" name="evidencia['.$rowIndex.']" accept=".jpg,.jpeg,.png,.pdf,.webp">';
-          if($ev){ echo ' <a href="../'.e($ev).'" target="_blank">Ver</a>'; }
+          echo '<td><select name="estado['.$rowIndex.']" class="form-select form-select-sm" style="background:rgba(255,255,255,.10); color:#fff; border-color:rgba(255,255,255,.18)">';
+          echo '<option value="" '.($est===''?'selected':'').'>—</option>';
+          echo '<option value="si" '.($est==='si'?'selected':'').'>Sí</option>';
+          echo '<option value="no" '.($est==='no'?'selected':'').'>No</option>';
+          echo '</select></td>';
+          echo '<td><input class="form-control form-control-sm" type="text" name="observacion['.$rowIndex.']" value="'.e($obs).'" placeholder="Escribir..."></td>';
+          echo '<td><input class="form-control form-control-sm" type="file" name="evidencia['.$rowIndex.']" accept=".jpg,.jpeg,.png,.pdf,.webp">';
+          if($ev){ echo ' <a class="ms-2" href="../'.e($ev).'" target="_blank">Ver</a>'; }
           echo '</td>';
           echo '</tr>';
           $rowIndex++;
         }
 
         if($rowIndex===1){
-          echo '<tr><td colspan="'.(count($headers)+3).'" class="muted">No se encontraron filas para mostrar. Probá “Ver con color (debug)” o revisá la hoja.</td></tr>';
+          echo '<tr><td colspan="'.(count($headers)+3).'" class="muted">No se encontraron filas para mostrar. Probá “Ver color (debug)” o revisá la hoja.</td></tr>';
         }
       ?>
       </tbody>
     </table>
   </div>
-
-  <div class="mt-2 text-end">
-    <button class="btn btn-acc btn-acc-sm" type="submit">Guardar todo</button>
-  </div>
 </form>
+
+<script>
+  (function(){
+    const form = document.getElementById('bulkForm');
+    const overlay = document.getElementById('overlay');
+    if(!form || !overlay) return;
+
+    form.addEventListener('submit', function(){
+      // Mostrar overlay y bloquear interacción
+      overlay.classList.add('show');
+      overlay.setAttribute('aria-hidden','false');
+      document.body.setAttribute('aria-busy','true');
+
+      // Opcional: deshabilitar botones y selects/inputs visibles (pero NO hidden)
+      const toDisable = document.querySelectorAll(
+        'button, a.btn-acc, a.btn-ghost, select, textarea, input:not([type="hidden"])'
+      );
+      toDisable.forEach(el => {
+        if (el.tagName === 'INPUT' && el.type === 'file') return; // no hace falta
+        if ('disabled' in el) el.disabled = true;
+        el.classList.add('pe-none');
+      });
+    });
+  })();
+</script>
 </body>
 </html>
