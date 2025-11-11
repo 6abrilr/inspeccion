@@ -1,13 +1,20 @@
 <?php
 /* public/ver_tabla.php — Tema 602 con paginación + toolbar compacta
-   Cambio pedido: “Nro TÍTULO / Nro ÍTEM / Ver-Ocultar color” unificados
-   en un único botón: “Formato de tabla” (dropdown).
+   Agregado: Formato “Formulario” en menú “Formato de tabla”, con columna “Dato”
+   para filas especiales (Predio en litigio, Estado actual, Predio, Dimensiones,
+   Tiempo estipulado, Organismo que lo suscribió), además de Sí/No/Obs/Evidencia.
 */
 require_once __DIR__ . '/../config/db.php';
 
 function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 function starts_with($h,$n){ return substr($h,0,strlen($n)) === $n; }
 function norm($s){ return preg_replace('/\s+/u','',mb_strtoupper(trim((string)$s),'UTF-8')); }
+
+/* ===== Rutas de assets para usar el mismo fondo que index.php ===== */
+$PUBLIC_URL = rtrim(str_replace('\\','/', dirname($_SERVER['SCRIPT_NAME'] ?? $_SERVER['PHP_SELF'])), '/');
+$APP_URL    = rtrim(str_replace('\\','/', dirname($PUBLIC_URL)), '/');
+$ASSETS_URL = ($APP_URL === '' ? '' : $APP_URL) . '/assets';
+$IMG_BG     = $ASSETS_URL . '/img/fondo.png';
 
 /* ===== Parámetros ===== */
 $rel = $_GET['p'] ?? '';
@@ -47,23 +54,41 @@ $SCOPE = $scopeMeta[$inScope];
 /* Mostrar “Carácter” solo en última inspección */
 $showCaracter = ($inScope === 'ultima_inspeccion');
 
-/* ===== Preferencia nro → título/ítem ===== */
+/* ===== Preferencias por archivo (modo nro + formato de tabla) ===== */
 $pdo->exec("CREATE TABLE IF NOT EXISTS xlsx_prefs (
   file_rel VARCHAR(512) PRIMARY KEY,
   mode_num_is ENUM('title','item') NOT NULL DEFAULT 'item',
+  table_fmt ENUM('classic','form') NOT NULL DEFAULT 'classic',
   updated_at TIMESTAMP NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
+/* En caso de que la tabla exista sin la columna table_fmt, intentamos agregarla (idempotente) */
+try { $pdo->exec("ALTER TABLE xlsx_prefs ADD COLUMN table_fmt ENUM('classic','form') NOT NULL DEFAULT 'classic'"); } catch(Throwable $e){ /* ignore */ }
+
 if(isset($_GET['setmode'])){
   $modeSet = $_GET['setmode']==='item' ? 'item' : 'title';
-  $up = $pdo->prepare("INSERT INTO xlsx_prefs(file_rel,mode_num_is,updated_at) VALUES(?,?,NOW())
+  $up = $pdo->prepare("INSERT INTO xlsx_prefs(file_rel,mode_num_is,updated_at)
+                       VALUES(?,?,NOW())
                        ON DUPLICATE KEY UPDATE mode_num_is=VALUES(mode_num_is), updated_at=NOW()");
   $up->execute([$rel,$modeSet]);
   $qs = 'p='.rawurlencode($rel).'&s='.$sheetIdx.($debugShowColor?'&showcolor=1':'')."&pp=$perPage&page=$page";
+  if(isset($_GET['fmt'])) $qs .= '&fmt='.rawurlencode($_GET['fmt']);
   header("Location: ver_tabla.php?".$qs); exit;
 }
-$stM = $pdo->prepare("SELECT mode_num_is FROM xlsx_prefs WHERE file_rel=?");
-$stM->execute([$rel]); $mode = $stM->fetchColumn() ?: 'item';
+if(isset($_GET['setfmt'])){
+  $fmtSet = ($_GET['setfmt']==='form') ? 'form' : 'classic';
+  $up = $pdo->prepare("INSERT INTO xlsx_prefs(file_rel,table_fmt,updated_at)
+                       VALUES(?,?,NOW())
+                       ON DUPLICATE KEY UPDATE table_fmt=VALUES(table_fmt), updated_at=NOW()");
+  $up->execute([$rel,$fmtSet]);
+  $qs = 'p='.rawurlencode($rel).'&s='.$sheetIdx.($debugShowColor?'&showcolor=1':'')."&pp=$perPage&page=$page";
+  header("Location: ver_tabla.php?".$qs); exit;
+}
+
+$stM = $pdo->prepare("SELECT mode_num_is, table_fmt FROM xlsx_prefs WHERE file_rel=?");
+$stM->execute([$rel]); $pref = $stM->fetch(PDO::FETCH_ASSOC) ?: ['mode_num_is'=>'item','table_fmt'=>'classic'];
+$mode = $pref['mode_num_is'] ?? 'item';
+$tableFmt = $pref['table_fmt'] ?? 'classic';
 
 /* ===== PhpSpreadsheet ===== */
 $autoload = $projectBase . '/vendor/autoload.php';
@@ -201,7 +226,7 @@ function is_title_row(array $r, string $mode){
   return false;
 }
 
-/* ===== Prefill ===== */
+/* ===== Tablas de datos ===== */
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   id INT AUTO_INCREMENT PRIMARY KEY,
   file_rel VARCHAR(512) NOT NULL,
@@ -212,8 +237,24 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   updated_at TIMESTAMP NULL,
   UNIQUE KEY uq_file_row (file_rel,row_idx)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+/* Nueva tabla para valores de “Dato” en Formulario */
+$pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  file_rel VARCHAR(512) NOT NULL,
+  row_idx INT NOT NULL,
+  field_key VARCHAR(128) NOT NULL,
+  field_value TEXT NULL,
+  updated_at TIMESTAMP NULL,
+  UNIQUE KEY uq_file_row_field (file_rel,row_idx,field_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
 $sel = $pdo->prepare("SELECT row_idx, estado, observacion, evidencia_path FROM checklist WHERE file_rel=?");
 $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_idx']]=$r; }
+
+$selF = $pdo->prepare("SELECT row_idx, field_key, field_value FROM checklist_form WHERE file_rel=?");
+$selF->execute([$rel]); $prefForm=[];
+foreach($selF as $r){ $i=(int)$r['row_idx']; $prefForm[$i][$r['field_key']] = $r['field_value']; }
 
 /* PDF vecino */
 $pdf_abs = preg_replace('/\.(xlsx|csv)$/i', '.pdf', $abs);
@@ -236,15 +277,44 @@ function row_severity_class($caracter){
   return '';
 }
 
+/* ===== Detección de filas “formulario” ===== */
+$formLabelsMap = [
+  'PREDIOENLITIGIO'             => 'predio_litigio',
+  'ESTADOACTUAL'                 => 'estado_actual',
+  'PREDIO'                       => 'predio',
+  'DIMENSIONES'                  => 'dimensiones',
+  'TIEMPOESTIPULADO'            => 'tiempo',
+  'ORGANISMOQUELOSUSCRIBIO'     => 'organismo',
+  'ORGANISMOQUELOSUSCRIBIÓ'     => 'organismo', // por si trae tilde
+];
+
+function detect_form_key(array $row, array $map){
+  // buscamos en las primeras 2-3 celdas
+  for($i=0;$i<min(3,count($row));$i++){
+    $n = norm((string)$row[$i]);
+    if($n==='') continue;
+    if(isset($map[$n])) return $map[$n];
+  }
+  return null;
+}
+
 /* ===== Construcción de listado visible + paginación ===== */
 $visible = [];
 $rowIndex=1; $lastSection=null;
 foreach($rows as $i=>$r){
-  if(!$debugShowColor && !empty($rowFill[$i])) continue;         // ocultar coloreadas
-  if(is_title_row($r,$mode)){ $lastSection=['section'=>true,'title'=>trim(($r[0]??'').' '.($r[1]??''))]; $rowIndex++; continue; }
+  if(!$debugShowColor && !empty($rowFill[$i])) continue; // ocultar coloreadas
+  if(is_title_row($r,$mode)){
+    $lastSection=['section'=>true,'title'=>trim(($r[0]??'').' '.($r[1]??''))];
+    $rowIndex++; continue;
+  }
   $sevClass = $showCaracter ? row_severity_class($r[2] ?? '') : '';
   $saved = $prefill[$rowIndex] ?? ['estado'=>'','observacion'=>'','evidencia_path'=>''];
   if($lastSection){ $visible[]=$lastSection; $lastSection=null; }
+
+  $fk = ($tableFmt==='form') ? detect_form_key($r, $formLabelsMap) : null;
+  $formVal = '';
+  if($fk && isset($prefForm[$rowIndex][$fk])) $formVal = (string)$prefForm[$rowIndex][$fk];
+
   $visible[] = [
     'section'=>false,
     'row_idx'=>$rowIndex,
@@ -252,7 +322,9 @@ foreach($rows as $i=>$r){
     'sevClass'=>$sevClass,
     'estado'=>$saved['estado'] ?? '',
     'observacion'=>$saved['observacion'] ?? '',
-    'ev'=>$saved['evidencia_path'] ?? ''
+    'ev'=>$saved['evidencia_path'] ?? '',
+    'form_key'=>$fk,
+    'form_val'=>$formVal,
   ];
   $rowIndex++;
 }
@@ -282,11 +354,11 @@ for($i=0;$i<count($visible);$i++){
   $render[] = $v;
 }
 
-/* Helper QS base */
-function base_qs($rel,$sheetIdx,$debugShowColor,$perPage){
-  return 'p='.rawurlencode($rel).'&s='.(int)$sheetIdx.($debugShowColor?'&showcolor=1':'').'&pp='.(int)$perPage;
+/* Helper QS base (arrastra formato) */
+function base_qs($rel,$sheetIdx,$debugShowColor,$perPage,$fmt){
+  return 'p='.rawurlencode($rel).'&s='.(int)$sheetIdx.($debugShowColor?'&showcolor=1':'').'&pp='.(int)$perPage.'&fmt='.rawurlencode($fmt);
 }
-$baseQS = base_qs($rel,$sheetIdx,$debugShowColor,$perPage);
+$baseQS = base_qs($rel,$sheetIdx,$debugShowColor,$perPage,$tableFmt);
 
 ?>
 <!doctype html>
@@ -299,7 +371,16 @@ $baseQS = base_qs($rel,$sheetIdx,$debugShowColor,$perPage);
 <link rel="stylesheet" href="assets/css/theme-602.css">
 <style>
 :root{ --sevRedRGB:239,68,68; --sevYellowRGB:245,158,11; --sevAlpha:0.35; }
-body{ background: radial-gradient(1200px 600px at 10% -10%, #151922 0, transparent 40%), #0f1117; color:#e7ecf4; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; }
+
+/* ====== Fondo y tipografía igual a index.php ====== */
+body{
+  background: url("<?= e($IMG_BG) ?>") no-repeat center center fixed;
+  background-size: cover;
+  background-attachment: fixed;
+  background-color:#0f1117; color:#e9eef5; margin:0; padding:0;
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;
+}
+
 .page{ padding:16px 16px 24px }
 .box{ background:rgba(20,24,33,.75); border:1px solid rgba(255,255,255,.14); border-radius:16px; padding:12px; backdrop-filter:blur(6px) }
 
@@ -336,28 +417,45 @@ body{ background: radial-gradient(1200px 600px at 10% -10%, #151922 0, transpare
 .form-compact label { font-size:.78rem; color:#cbd5e1; }
 .form-compact .form-select { padding:.25rem .5rem; height: 32px; border-radius: 8px; font-size:.86rem; }
 
-/* Tabla */
+/* ====== Tabla ====== */
 table{ width:100%; border-collapse:separate; border-spacing:0; }
-thead th{ position:sticky; top:0; z-index:3; background:#0b111a; color:#e7ecf4; border-bottom:1px solid rgba(255,255,255,.2); padding:12px; text-transform:uppercase; letter-spacing:.04em; font-weight:800; }
+thead th{
+  position:sticky; top:0; z-index:3;
+  background:#11151d; color:#e7ecf4;
+  border-bottom:1px solid rgba(255,255,255,.2);
+  padding:12px; text-transform:uppercase; letter-spacing:.04em; font-weight:800;
+}
 tbody td{ padding:12px; border-bottom:1px solid rgba(255,255,255,.10); vertical-align:top; color:#d5deea; }
 tbody tr:nth-child(even){ background:rgba(255,255,255,.02) }
 tbody tr:hover{ background:rgba(255,255,255,.05) }
 .section{ background:linear-gradient(90deg, rgba(34,197,94,.18), rgba(34,197,94,.10)); color:#eaf7ee; font-weight:800; }
 
+/* Anchos */
 @media (min-width: 1100px){
-  thead th:nth-last-child(3), tbody td:nth-last-child(3){ width:160px }
-  thead th:nth-last-child(2), tbody td:nth-last-child(2){ width:360px }
-  thead th:nth-last-child(1), tbody td:nth-last-child(1){ width:340px }
+  thead th:nth-last-child(3), tbody td:nth-last-child(3){ width:160px }  /* Estado / Dato (según formato) */
+  thead th:nth-last-child(2), tbody td:nth-last-child(2){ width:360px }  /* Observación */
+  thead th:nth-last-child(1), tbody td:nth-last-child(1){ width:340px }  /* Evidencia */
 }
 
-select, input[type="text"]{ width:100%; background:#0f1520; color:#e6edf7; border:1px solid rgba(255,255,255,.22); border-radius:10px; padding:.45rem .55rem; }
-input[type="file"]{ background:#0f1520; color:#e6edf7; border:1px solid rgba(255,255,255,.22); border-radius:10px; padding:.35rem .55rem; }
+/* Inputs */
+select, input[type="text"]{
+  width:100%; background:#0f1520; color:#e6edf7; border:1px solid rgba(255,255,255,.22); border-radius:10px; padding:.45rem .55rem;
+}
+input[type="file"]{
+  background:#0f1520; color:#e6edf7; border:1px solid rgba(255,255,255,.22); border-radius:10px; padding:.35rem .55rem;
+}
+
+/* Overlay */
 #overlay{ position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:9999; }
 #overlay.show{ display:flex; }
 .spinner{ width:72px; height:72px; border-radius:50%; border:6px solid rgba(255,255,255,.2); border-top-color:#22c55e; animation: spin 1s linear infinite; }
 @keyframes spin { to{ transform: rotate(360deg); } }
+
+/* Severidad (“Carácter”) */
 .sev-immediate td{ background: rgba(var(--sevRedRGB), var(--sevAlpha)) !important; border-left: 4px solid rgb(var(--sevRedRGB)); }
 .sev-program  td{ background: rgba(var(--sevYellowRGB), var(--sevAlpha)) !important; border-left: 4px solid rgb(var(--sevYellowRGB)); }
+
+/* Marca */
 .brand-hero .brand-title{ color:#f3f7fb } .brand-hero .brand-sub{ color:#b9c6d8 }
 </style>
 </head>
@@ -407,7 +505,7 @@ input[type="file"]{ background:#0f1520; color:#e6edf7; border:1px solid rgba(255
     </div>
 
     <div class="right">
-      <!-- NUEVO: botón único “Formato de tabla” -->
+      <!-- Botón único “Formato de tabla” -->
       <div class="dropdown">
         <button class="btnx dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
           🧩 Formato de tabla
@@ -421,8 +519,12 @@ input[type="file"]{ background:#0f1520; color:#e6edf7; border:1px solid rgba(255
           <?php if(!$debugShowColor): ?>
             <li><a class="dropdown-item" href="ver_tabla.php?<?= $baseQS ?>&page=<?= (int)$page ?>&showcolor=1">Ver color (debug)</a></li>
           <?php else: ?>
-            <li><a class="dropdown-item" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,false,$perPage) ?>&page=<?= (int)$page ?>">Ocultar color</a></li>
+            <li><a class="dropdown-item" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,false,$perPage,$tableFmt) ?>&page=<?= (int)$page ?>">Ocultar color</a></li>
           <?php endif; ?>
+          <li><hr class="dropdown-divider"></li>
+          <li class="dropdown-header">Formato</li>
+          <li><a class="dropdown-item<?= $tableFmt==='classic'?' active':'' ?>" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,$debugShowColor,$perPage,'classic') ?>&setfmt=classic&page=<?= (int)$page ?>">Clásico</a></li>
+          <li><a class="dropdown-item<?= $tableFmt==='form'?' active':'' ?>" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,$debugShowColor,$perPage,'form') ?>&setfmt=form&page=<?= (int)$page ?>">Formulario (Predio/Dimensiones/...)</a></li>
         </ul>
       </div>
 
@@ -442,6 +544,7 @@ input[type="file"]{ background:#0f1520; color:#e6edf7; border:1px solid rgba(255
       <input type="hidden" name="p" value="<?= e($rel) ?>">
       <input type="hidden" name="s" value="<?= (int)$sheetIdx ?>">
       <?php if($debugShowColor): ?><input type="hidden" name="showcolor" value="1"><?php endif; ?>
+      <?php if($tableFmt): ?><input type="hidden" name="fmt" value="<?= e($tableFmt) ?>"><?php endif; ?>
       <label>Ítems por página:</label>
       <select name="pp" class="form-select form-select-sm" onchange="this.form.submit()">
         <?php foreach($allowedPP as $pp): ?><option value="<?= $pp ?>" <?= $pp===$perPage?'selected':'' ?>><?= $pp ?></option><?php endforeach; ?>
@@ -483,12 +586,14 @@ input[type="file"]{ background:#0f1520; color:#e6edf7; border:1px solid rgba(255
     <input type="hidden" name="showcolor" value="<?= $debugShowColor?'1':'0' ?>">
     <input type="hidden" name="pp" value="<?= (int)$perPage ?>">
     <input type="hidden" name="page" value="<?= (int)$page ?>">
+    <input type="hidden" name="fmt" value="<?= e($tableFmt) ?>">
 
     <div style="overflow:auto; max-height:72vh;">
       <table>
         <thead>
           <tr>
             <?php foreach($headers as $h): ?><th><?= e($h) ?></th><?php endforeach; ?>
+            <?php if($tableFmt==='form'): ?><th>Dato</th><?php endif; ?>
             <th>Estado</th>
             <th>Observación</th>
             <th>Evidencia</th>
@@ -497,26 +602,49 @@ input[type="file"]{ background:#0f1520; color:#e6edf7; border:1px solid rgba(255
         <tbody>
         <?php
           if(empty($render)){
-            echo '<tr><td colspan="'.(count($headers)+3).'" class="text-muted">No hay filas para esta página.</td></tr>';
+            $extraCols = ($tableFmt==='form') ? 4 : 3;
+            echo '<tr><td colspan="'.(count($headers)+$extraCols).'" class="text-muted">No hay filas para esta página.</td></tr>';
           } else {
             foreach($render as $v){
               if(!empty($v['section'])){
                 $title = trim($v['title'] ?? ''); if($title==='') $title='—';
-                echo '<tr class="section"><td colspan="'.count($headers).'">'.e($title).'</td><td colspan="3"></td></tr>';
+                $extraCols = ($tableFmt==='form') ? 4 : 3;
+                echo '<tr class="section"><td colspan="'.count($headers).'">'.e($title).'</td><td colspan="'.$extraCols.'"></td></tr>';
                 continue;
               }
-              $r = $v['cols']; $rowIdx=(int)$v['row_idx']; $est=$v['estado']; $obs=$v['observacion']; $ev=$v['ev']; $sevClass=$v['sevClass'];
+              $r = $v['cols'];
+              $rowIdx=(int)$v['row_idx'];
+              $est=$v['estado']; $obs=$v['observacion']; $ev=$v['ev'];
+              $sevClass=$v['sevClass'];
+              $fk = $v['form_key'] ?? null;
+              $fv = $v['form_val'] ?? '';
+
               echo '<tr'.($sevClass ? ' class="'.$sevClass.'"' : '').'>';
               foreach($r as $vv){ echo '<td>'.e($vv).'</td>'; }
 
+              // Columna “Dato” (solo en formato Formulario)
+              if($tableFmt==='form'){
+                echo '<td>';
+                if($fk){
+                  echo '<input type="hidden" name="form_key['.$rowIdx.']" value="'.e($fk).'">';
+                  echo '<input class="form-control form-control-sm" type="text" name="form_val['.$rowIdx.']" value="'.e($fv).'" placeholder="Completar…">';
+                }else{
+                  echo '<span class="text-muted">—</span>';
+                }
+                echo '</td>';
+              }
+
+              // Estado
               echo '<td><select name="estado['.$rowIdx.']" class="form-select form-select-sm">';
               echo '<option value="" '.($est===''?'selected':'').'>—</option>';
               echo '<option value="si" '.($est==='si'?'selected':'').'>Sí</option>';
               echo '<option value="no" '.($est==='no'?'selected':'').'>No</option>';
               echo '</select></td>';
 
+              // Observación
               echo '<td><input class="form-control form-control-sm" type="text" name="observacion['.$rowIdx.']" value="'.e($obs).'" placeholder="Escribir..."></td>';
 
+              // Evidencia
               echo '<td><div class="d-flex align-items-center gap-2 flex-wrap">';
               echo   '<input class="form-control form-control-sm" type="file" name="evidencia['.$rowIdx.']" accept=".jpg,.jpeg,.png,.pdf,.webp">';
               if ($ev) {
@@ -553,7 +681,6 @@ input[type="file"]{ background:#0f1520; color:#e6edf7; border:1px solid rgba(255
     });
   })();
 </script>
-<!-- Necesario para dropdowns -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
