@@ -1,0 +1,95 @@
+/* ========== Batallón Com 602 – Tema y Fondo ========== */
+:root{
+  /* Paleta */
+  --ink:#0b1326; --deep:#0a1830; --glow:#1e7bdc;
+  --mesh-opacity:.72; --glow-strength:.55;
+
+  /* UI genérica (por si la necesitás en tablas/tarjetas) */
+  --card-bg:#ffffff; --card-border:#e9ecef; --shadow:0 8px 24px rgba(33,37,41,.06);
+  --primary:#0d6efd; --primary-2:#0b5ed7; --ring:#86b7fe;
+  --thead:#f6f7f9; --row-sep:#e9ecef; --thead-text:#111;
+  --thead-internado:#ffe4c2; --thead-alta:#d9f4e0; --thead-fallecido:#d7ebff;
+
+  --container-max: 1280px;
+}
+
+html,body{ height:100%; }
+body{ margin:0; color:#e9eef5; background:#000; }
+
+/* ===== Fondo por gradientes (sin imágenes) ===== */
+.page-bg{
+  position:fixed; inset:0; z-index:-2; pointer-events:none;
+  background:
+    radial-gradient(1200px 800px at 78% 24%, rgba(30,123,220,var(--glow-strength)) 0%, rgba(30,123,220,0) 60%),
+    radial-gradient(1000px 700px at 12% 82%, rgba(30,123,220,.35) 0%, rgba(30,123,220,0) 60%),
+    linear-gradient(160deg, var(--ink) 0%, var(--deep) 55%, #071020 100%);
+  background-attachment: fixed,fixed,fixed;
+  filter: saturate(1.05);
+}
+.page-bg::before{
+  content:""; position:absolute; inset:0; z-index:-1; opacity:.22;
+  background-image:
+    radial-gradient(1.4px 1.4px at 18% 22%, #9cd1ff 20%, transparent 60%),
+    radial-gradient(1.2px 1.2px at 63% 48%, #b7ddff 20%, transparent 60%),
+    radial-gradient(1.2px 1.2px at 82% 70%, #b7ddff 20%, transparent 60%),
+    radial-gradient(1.6px 1.6px at 34% 76%, #cbe8ff 20%, transparent 60%),
+    radial-gradient(1.1px 1.1px at 72% 16%, #a7d6ff 20%, transparent 60%);
+  background-repeat:no-repeat;
+  background-size: 1200px 800px, 1400px 900px, 1100px 900px, 1400px 1000px, 1300px 800px;
+  background-position: 0 0, 30% 40%, 80% 60%, 10% 90%, 70% 10%;
+}
+
+/* ===== Malla brillante (OJO: ruta relativa al CSS) =====
+   Si el CSS está en /public/assets/css/theme-602.css
+   y el SVG en /public/assets/img/mesh-light.svg,
+   la ruta correcta es ../img/mesh-light.svg */
+.mesh{
+  position:fixed; right:-220px; top:-140px;
+  width:1400px; height:900px;
+  z-index:-1; opacity:var(--mesh-opacity);
+  background: url("../img/mesh-light.svg") no-repeat center/contain;
+  mix-blend-mode:screen;
+  filter: drop-shadow(0 0 36px rgba(124,196,255,.25));
+  pointer-events:none;
+}
+.mesh.mesh--left{
+  left:-260px; top:180px; right:auto;
+  transform:scaleX(-1) rotate(3deg);
+}
+
+/* ===== Encabezado tipo “hero” ===== */
+.brand-hero{ position:relative; padding:22px 0 16px; color:#e9f2ff; isolation:isolate; }
+.hero-inner{ display:flex; align-items:center; gap:14px; }
+.brand-logo{
+  width:44px; height:44px; object-fit:contain; flex:0 0 auto;
+  filter: drop-shadow(0 2px 10px rgba(124,196,255,.30));
+}
+.brand-title{
+  font-weight:800; letter-spacing:.4px; font-size:22px; line-height:1.1;
+  text-shadow:0 2px 16px rgba(30,123,220,.45); margin:0;
+}
+.brand-sub{
+  font-size:14px; opacity:.95;
+  border-top:2px solid rgba(124,196,255,.35);
+  display:inline-block; padding-top:4px; margin-top:2px;
+}
+.brand-year{ margin-left:auto; font-size:18px; font-weight:700; opacity:.85; }
+
+/* ===== Helpers UI opcionales ===== */
+.table thead th{ background:var(--thead); color:var(--thead-text); font-weight:600; border-top:1px solid #dee2e6; }
+.table-sm td, .table-sm th{ padding:.45rem .6rem; }
+.table tbody tr + tr td{ border-top:1px solid var(--row-sep); }
+.tbl-internado thead th{ background:var(--thead-internado)!important; }
+.tbl-alta      thead th{ background:var(--thead-alta)!important; }
+.tbl-fallecido thead th{ background:var(--thead-fallecido)!important; }
+
+.card{ border-radius:14px; border:1px solid var(--card-border); box-shadow:var(--shadow); background:var(--card-bg); }
+.card .card-body{ padding:18px; }
+
+@media (min-width:1200px){
+  .container{ max-width:var(--container-max)!important; }
+}
+@media (max-width:576px){
+  .brand-title{ font-size:18px; }
+  .brand-year{ font-size:16px; }
+}

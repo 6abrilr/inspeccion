@@ -1,23 +1,53 @@
 <?php
+/* public/ver_tabla.php — Tema 602 con paginación + toolbar compacta
+   Cambio pedido: “Nro TÍTULO / Nro ÍTEM / Ver-Ocultar color” unificados
+   en un único botón: “Formato de tabla” (dropdown).
+*/
 require_once __DIR__ . '/../config/db.php';
 
 function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
+function starts_with($h,$n){ return substr($h,0,strlen($n)) === $n; }
+function norm($s){ return preg_replace('/\s+/u','',mb_strtoupper(trim((string)$s),'UTF-8')); }
 
+/* ===== Parámetros ===== */
 $rel = $_GET['p'] ?? '';
 $sheetIdx = isset($_GET['s']) ? max(0,(int)$_GET['s']) : 0;
 $debugShowColor = isset($_GET['showcolor']);
 
+/* Paginación */
+$allowedPP = [10,20,30,50,100];
+$perPage = (int)($_GET['pp'] ?? 20);
+if(!in_array($perPage,$allowedPP,true)) $perPage = 20;
+$page = max(1,(int)($_GET['page'] ?? 1));
+
+/* ===== Paths base ===== */
 $projectBase = realpath(__DIR__ . '/..');
-$scanRoot    = realpath($projectBase . '/storage/listas_control');
 $abs         = realpath($projectBase . '/' . $rel);
+if(!$projectBase || !$abs || !is_file($abs)){
+  http_response_code(400); echo "Ruta inválida"; exit;
+}
 
-$ok = $scanRoot && $abs && is_file($abs) && (substr($abs,0,strlen($scanRoot)) === $scanRoot);
-if(!$ok){ http_response_code(400); echo "Ruta inválida"; exit; }
+/* ===== Rutas permitidas ===== */
+$roots = [
+  'listas_control'            => realpath($projectBase.'/storage/listas_control'),
+  'ultima_inspeccion'         => realpath($projectBase.'/storage/ultima_inspeccion'),
+  'visitas_de_estado_mayor'   => realpath($projectBase.'/storage/visitas_de_estado_mayor'),
+];
+$inScope = null;
+foreach($roots as $slug=>$root){ if($root && starts_with($abs, $root)){ $inScope=$slug; break; } }
+if(!$inScope){ http_response_code(400); echo "Ruta fuera de las carpetas permitidas"; exit; }
 
-$ext = strtolower(pathinfo($abs, PATHINFO_EXTENSION));
-if(!in_array($ext, ['xlsx','csv'])){ http_response_code(400); echo "Solo XLSX/CSV"; exit; }
+$scopeMeta = [
+  'listas_control' => ['label' => 'Lista de control', 'list_url' => 'lista_de_control.php', 'dash_scope' => 'lista_de_control'],
+  'ultima_inspeccion' => ['label' => 'Última inspección', 'list_url' => 'ultima_inspeccion.php', 'dash_scope' => 'ultima_inspeccion'],
+  'visitas_de_estado_mayor' => ['label' => 'Visitas de Estado Mayor', 'list_url' => 'visitas_de_estado_mayor.php', 'dash_scope' => 'visitas_de_estado_mayor'],
+];
+$SCOPE = $scopeMeta[$inScope];
 
-/* Preferencia nro → título/ítem (por defecto: item) */
+/* Mostrar “Carácter” solo en última inspección */
+$showCaracter = ($inScope === 'ultima_inspeccion');
+
+/* ===== Preferencia nro → título/ítem ===== */
 $pdo->exec("CREATE TABLE IF NOT EXISTS xlsx_prefs (
   file_rel VARCHAR(512) PRIMARY KEY,
   mode_num_is ENUM('title','item') NOT NULL DEFAULT 'item',
@@ -25,24 +55,23 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS xlsx_prefs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
 if(isset($_GET['setmode'])){
-  $mode = $_GET['setmode']==='item' ? 'item' : 'title';
+  $modeSet = $_GET['setmode']==='item' ? 'item' : 'title';
   $up = $pdo->prepare("INSERT INTO xlsx_prefs(file_rel,mode_num_is,updated_at) VALUES(?,?,NOW())
                        ON DUPLICATE KEY UPDATE mode_num_is=VALUES(mode_num_is), updated_at=NOW()");
-  $up->execute([$rel,$mode]);
-  $qs = 'p='.rawurlencode($rel).'&s='.$sheetIdx.($debugShowColor?'&showcolor=1':'');
+  $up->execute([$rel,$modeSet]);
+  $qs = 'p='.rawurlencode($rel).'&s='.$sheetIdx.($debugShowColor?'&showcolor=1':'')."&pp=$perPage&page=$page";
   header("Location: ver_tabla.php?".$qs); exit;
 }
 $stM = $pdo->prepare("SELECT mode_num_is FROM xlsx_prefs WHERE file_rel=?");
 $stM->execute([$rel]); $mode = $stM->fetchColumn() ?: 'item';
 
-/* Autoload PhpSpreadsheet */
+/* ===== PhpSpreadsheet ===== */
 $autoload = $projectBase . '/vendor/autoload.php';
 $ssAvail = is_file($autoload);
-if($ext==='xlsx' && !$ssAvail){
-  $errFatal = "No encuentro PhpSpreadsheet (vendor/autoload.php). Instálalo con Composer.";
-}
+$ext = strtolower(pathinfo($abs, PATHINFO_EXTENSION));
+if($ext==='xlsx' && !$ssAvail){ $errFatal = "No encuentro PhpSpreadsheet (vendor/autoload.php). Instálalo con Composer."; }
 
-/* ===== Helpers ===== */
+/* ===== Lectores ===== */
 function read_csv_all($file){
   $rows=[]; $fh=@fopen($file,'r'); if(!$fh) return [$rows, ['CSV'], [], null];
   $first=fgets($fh); if($first===false){ fclose($fh); return [$rows, ['CSV'], [], null]; }
@@ -54,23 +83,16 @@ function read_csv_all($file){
   return [$rows, ['CSV'], $meta, null];
 }
 
-/* ===== XLSX ===== */
 if(!isset($errFatal) && $ext==='xlsx'){
   require_once $autoload;
-
-  function coord($c,$r){
-    return \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($c).$r;
-  }
+  function coord($c,$r){ return \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($c).$r; }
   function cell_text($cell){
     if(!$cell) return '';
     $v = $cell->getValue();
-    if($v instanceof \PhpOffice\PhpSpreadsheet\RichText\RichText){
-      return trim((string)$v->getPlainText());
-    }
+    if($v instanceof \PhpOffice\PhpSpreadsheet\RichText\RichText){ return trim((string)$v->getPlainText()); }
     $calc = $cell->getCalculatedValue();
     if(is_scalar($calc) && $calc!=='') return trim((string)$calc);
-    $fmt = $cell->getFormattedValue();
-    return trim((string)$fmt);
+    return trim((string)$cell->getFormattedValue());
   }
   function sheet_used_bounds($sh){
     $maxR=$sh->getHighestRow();
@@ -78,33 +100,26 @@ if(!isset($errFatal) && $ext==='xlsx'){
     $minR=$maxR; $minC=$maxC; $found=false;
     for($r=1;$r<=$maxR;$r++){
       for($c=1;$c<=$maxC;$c++){
-        $cell = $sh->getCell(coord($c,$r));
-        $txt = cell_text($cell);
-        if(trim($txt)!==''){ $found=true; if($r<$minR)$minR=$r; if($c<$minC)$minC=$c; }
+        if(trim(cell_text($sh->getCell(coord($c,$r))))!==''){ $found=true; if($r<$minR)$minR=$r; if($c<$minC)$minC=$c; }
       }
     }
     if(!$found) return [1,1,0,0];
     while($maxR>=$minR){
-      $empty=true;
-      for($c=$minC;$c<=$maxC;$c++){ if(trim(cell_text($sh->getCell(coord($c,$maxR))))!==''){ $empty=false; break; } }
+      $empty=true; for($c=$minC;$c<=$maxC;$c++){ if(trim(cell_text($sh->getCell(coord($c,$maxR))))!==''){ $empty=false; break; } }
       if($empty) $maxR--; else break;
     }
     while($maxC>=$minC){
-      $empty=true;
-      for($r=$minR;$r<=$maxR;$r++){ if(trim(cell_text($sh->getCell(coord($maxC,$r))))!==''){ $empty=false; break; } }
+      $empty=true; for($r=$minR;$r<=$maxR;$r++){ if(trim(cell_text($sh->getCell(coord($maxC,$r))))!==''){ $empty=false; break; } }
       if($empty) $maxC--; else break;
     }
     return [$minR,$minC,$maxR,$maxC];
   }
   function cell_has_fill($sh,$c,$r){
-    $style = $sh->getStyle(coord($c,$r));
-    if(!$style) return false;
-    $fill = $style->getFill();
-    if(!$fill) return false;
+    $style = $sh->getStyle(coord($c,$r)); if(!$style) return false;
+    $fill = $style->getFill(); if(!$fill) return false;
     if($fill->getFillType() !== \PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID) return false;
     $rgb = strtoupper($fill->getStartColor()->getRGB() ?: '');
-    if($rgb==='' || $rgb==='FFFFFF') return false;
-    return true;
+    return !($rgb==='' || $rgb==='FFFFFF');
   }
   function expand_merged_values($sh,&$grid,$minR,$minC){
     foreach($sh->getMergeCells() as $range){
@@ -116,32 +131,25 @@ if(!isset($errFatal) && $ext==='xlsx'){
       $val=cell_text($sh->getCell($tl));
       for($r=$tlR;$r<=$brR;$r++){
         for($c=$tlC;$c<=$brC;$c++){
-          $ri=$r-$minR; $ci=$c-$minC;
-          if(!isset($grid[$ri][$ci]) || $grid[$ri][$ci]==='') $grid[$ri][$ci]=$val;
+          $ri=$r-$minR; $ci=$c-$minC; if(!isset($grid[$ri][$ci]) || $grid[$ri][$ci]==='') $grid[$ri][$ci]=$val;
         }
       }
     }
   }
   function read_xlsx_all($file,$sheetIdx=0,&$sheetNames=[],&$err=null){
     try{
-      $reader=new \PhpOffice\PhpSpreadsheet\Reader\Xlsx();
-      $reader->setReadDataOnly(false);
+      $reader=new \PhpOffice\PhpSpreadsheet\Reader\Xlsx(); $reader->setReadDataOnly(false);
       $ss=$reader->load($file);
-      $sheetNames=[]; $count=$ss->getSheetCount();
-      for($i=0;$i<$count;$i++){ $sheetNames[]=$ss->getSheet($i)->getTitle(); }
+      $sheetNames=[]; $count=$ss->getSheetCount(); for($i=0;$i<$count;$i++){ $sheetNames[]=$ss->getSheet($i)->getTitle(); }
       if($sheetIdx>=$count) $sheetIdx=0;
       $sh=$ss->getSheet($sheetIdx);
-
       [$minR,$minC,$maxR,$maxC]=sheet_used_bounds($sh);
-      if($maxR<$minR||$maxC<$minC) return [[],[]];
-
+      if($maxR<$minR||$maxC<$minC) return [[],[],[], null];
       $rows=[]; $rowFill=[];
       for($r=$minR;$r<=$maxR;$r++){
         $line=[]; $hasFill=false;
-        for($c=$minC;$c<=$maxC;$c++){
-          $cell = $sh->getCell(coord($c,$r));
-          $txt  = cell_text($cell);
-          $line[] = $txt;
+        for($c=1;$c<=$maxC;$c++){
+          $line[] = cell_text($sh->getCell(coord($c,$r)));
           if(!$hasFill && cell_has_fill($sh,$c,$r)) $hasFill=true;
         }
         $rows[]=$line; $rowFill[]=$hasFill;
@@ -160,7 +168,7 @@ else{
   else{ [$rows,$rowFill,$sheetNames,$err]=read_xlsx_all($abs,$sheetIdx,$sheetNames,$err); }
 }
 
-/* Encabezados */
+/* ===== Encabezados y recorte a 2/3 columnas ===== */
 $headers=[];
 if($rows){
   $first=$rows[0]; $non=0; foreach($first as $v){ if(trim((string)$v)!=='') $non++; }
@@ -169,32 +177,22 @@ if($rows){
     array_shift($rows); if($rowFill) array_shift($rowFill);
   }
 }
-$cols = $rows ? max(array_map('count',$rows)) : count($headers);
 if(!$headers){
-  for($i=1;$i<=$cols;$i++){
-    $headers[] = ($i==2 ? 'Inspecciones' : 'Col'.$i);
-  }
+  $headers = ['Obs Nro', 'Observaciones'];
+  if($showCaracter) $headers[] = 'Carácter';
+}else{
+  if(isset($headers[1])) $headers[1] = 'Observaciones';
+  if($showCaracter){ $headers[2] = 'Carácter'; } else { $headers = array_slice($headers, 0, 2); }
 }
-
-/* === Mostrar solo 2 columnas de contenido (Col1 + Col2 “Inspecciones”) === */
-$MAX_TEXT_COLS = 2;
-
-// Aseguro encabezados mínimos y renombro Col2
-$headers = array_values($headers);
-$headers = array_pad($headers, $MAX_TEXT_COLS, '');
-$headers = array_slice($headers, 0, $MAX_TEXT_COLS);
-if (isset($headers[1])) $headers[1] = 'Inspecciones';
-
-// Recorto/padeo cada fila a esas 2 columnas
+$MAX_TEXT_COLS = $showCaracter ? 3 : 2;
+$headers = array_slice(array_pad(array_values($headers), $MAX_TEXT_COLS, ''), 0, $MAX_TEXT_COLS);
 foreach ($rows as $i => $r) {
-  $r = array_values($r);
-  $r = array_pad($r, $MAX_TEXT_COLS, '');
-  $rows[$i] = array_slice($r, 0, $MAX_TEXT_COLS);
+  $rows[$i] = array_slice(array_pad(array_values($r), $MAX_TEXT_COLS, ''), 0, $MAX_TEXT_COLS);
 }
 
+/* Filas-título */
 function is_title_row(array $r, string $mode){
-  $a=trim((string)($r[0]??'')); $b=trim((string)($r[1]??''));
-  $hasDigit = ($a!=='' && preg_match('/\d/',$a)===1);
+  $a=trim((string)($r[0]??'')); $b=trim((string)($r[1]??'')); $hasDigit = ($a!=='' && preg_match('/\d/',$a)===1);
   if($mode==='title' && $hasDigit) return true;
   if($mode==='item'  && $hasDigit) return false;
   $othersEmpty=true; for($i=2;$i<count($r);$i++){ if(trim((string)$r[$i])!==''){ $othersEmpty=false; break; } }
@@ -203,7 +201,7 @@ function is_title_row(array $r, string $mode){
   return false;
 }
 
-/* Prefill respuestas */
+/* ===== Prefill ===== */
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   id INT AUTO_INCREMENT PRIMARY KEY,
   file_rel VARCHAR(512) NOT NULL,
@@ -217,207 +215,345 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
 $sel = $pdo->prepare("SELECT row_idx, estado, observacion, evidencia_path FROM checklist WHERE file_rel=?");
 $sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_idx']]=$r; }
 
-/* PDF al lado del Excel (mismo nombre, .pdf) */
+/* PDF vecino */
 $pdf_abs = preg_replace('/\.(xlsx|csv)$/i', '.pdf', $abs);
 $pdf_rel = preg_replace('/\.(xlsx|csv)$/i', '.pdf', $rel);
 $pdf_exists = is_file($pdf_abs);
+
+/* Area/labels */
+$area = strtoupper($SCOPE['label']);
+if ($inScope==='listas_control' && preg_match('#/storage/listas_control/(S1|S2|S3|S4)/#', $rel, $m)) { $area = $m[1]; }
+
+/* Última actualización */
+$stUpd = $pdo->prepare("SELECT MAX(updated_at) FROM checklist WHERE file_rel=?");
+$stUpd->execute([$rel]); $lastUpd = $stUpd->fetchColumn();
+
+/* Severidad por “Carácter” */
+function row_severity_class($caracter){
+  $n = norm($caracter);
+  if($n==='INMEDIATA') return 'sev-immediate';
+  if($n==='PROGRAMADA' || $n==='PROGRAMA' || $n==='PROGRAMAS') return 'sev-program';
+  return '';
+}
+
+/* ===== Construcción de listado visible + paginación ===== */
+$visible = [];
+$rowIndex=1; $lastSection=null;
+foreach($rows as $i=>$r){
+  if(!$debugShowColor && !empty($rowFill[$i])) continue;         // ocultar coloreadas
+  if(is_title_row($r,$mode)){ $lastSection=['section'=>true,'title'=>trim(($r[0]??'').' '.($r[1]??''))]; $rowIndex++; continue; }
+  $sevClass = $showCaracter ? row_severity_class($r[2] ?? '') : '';
+  $saved = $prefill[$rowIndex] ?? ['estado'=>'','observacion'=>'','evidencia_path'=>''];
+  if($lastSection){ $visible[]=$lastSection; $lastSection=null; }
+  $visible[] = [
+    'section'=>false,
+    'row_idx'=>$rowIndex,
+    'cols'=>$r,
+    'sevClass'=>$sevClass,
+    'estado'=>$saved['estado'] ?? '',
+    'observacion'=>$saved['observacion'] ?? '',
+    'ev'=>$saved['evidencia_path'] ?? ''
+  ];
+  $rowIndex++;
+}
+
+/* Estadísticas (solo datos) */
+$cSi=$cNo=$cNull=0;
+foreach($visible as $v){ if(!empty($v['section'])) continue; $sv=$v['estado']??''; if($sv==='si') $cSi++; elseif($sv==='no') $cNo++; else $cNull++; }
+$mostradas = $cSi+$cNo+$cNull;
+$pct = $mostradas ? round($cSi*100.0/$mostradas,1) : 0.0;
+
+/* Paginación */
+$totalItems = 0; foreach($visible as $v){ if(empty($v['section'])) $totalItems++; }
+$totalPages = max(1, (int)ceil($totalItems / $perPage));
+if($page > $totalPages) $page = $totalPages;
+
+$startItem = ($page-1)*$perPage + 1;
+$endItem   = min($totalItems, $page*$perPage);
+
+$render = [];
+$counter=0; $pendingSection=null;
+for($i=0;$i<count($visible);$i++){
+  $v = $visible[$i];
+  if(!empty($v['section'])){ $pendingSection=$v; continue; }
+  $counter++;
+  if($counter < $startItem || $counter > $endItem) { $pendingSection=null; continue; }
+  if($pendingSection){ $render[]=$pendingSection; $pendingSection=null; }
+  $render[] = $v;
+}
+
+/* Helper QS base */
+function base_qs($rel,$sheetIdx,$debugShowColor,$perPage){
+  return 'p='.rawurlencode($rel).'&s='.(int)$sheetIdx.($debugShowColor?'&showcolor=1':'').'&pp='.(int)$perPage;
+}
+$baseQS = base_qs($rel,$sheetIdx,$debugShowColor,$perPage);
+
 ?>
 <!doctype html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
-<title><?= e(basename($abs)) ?></title>
+<title><?= e(basename($abs)) ?> — <?= e($area) ?></title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/theme-602.css">
 <style>
-  /* Paleta oscura + acento */
-  body{
-    background: radial-gradient(1200px 600px at 10% -10%, #151922 0, transparent 40%), #0f1117;
-    color:#e9eef5;
-    font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu;
-    margin:0; padding:16px;
-  }
-  .box{background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1); border-radius:16px; padding:12px; backdrop-filter:blur(6px)}
-  .toolbar .btn{ border-radius:10px; font-weight:700; padding:.35rem .7rem; }
-  .btn-acc{background:#16a34a; border:none; color:#fff}
-  .btn-acc:hover{background:#22c55e}
-  .btn-ghost{background:transparent; border:1px solid rgba(255,255,255,.2); color:#e9eef5}
-  .btn-ghost:hover{background:rgba(255,255,255,.08)}
-  .btn-danger-ghost{border-color:#ef4444; color:#fecaca}
-  .btn-danger-ghost:hover{background:rgba(239,68,68,.15)}
+:root{ --sevRedRGB:239,68,68; --sevYellowRGB:245,158,11; --sevAlpha:0.35; }
+body{ background: radial-gradient(1200px 600px at 10% -10%, #151922 0, transparent 40%), #0f1117; color:#e7ecf4; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; }
+.page{ padding:16px 16px 24px }
+.box{ background:rgba(20,24,33,.75); border:1px solid rgba(255,255,255,.14); border-radius:16px; padding:12px; backdrop-filter:blur(6px) }
 
-  /* Tabla */
-  table{ width:100%; border-collapse:collapse; table-layout:auto; }
-  th,td{
-    padding:10px; border-bottom:1px solid rgba(255,255,255,.12); vertical-align:top;
-    white-space:normal; overflow-wrap:anywhere;
-  }
-  thead th{
-    position:sticky; top:0; z-index:5;
-    background:#11151d; color:#e9eef5;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-    font-weight:800; letter-spacing:.04em; text-transform:uppercase;
-  }
-  /* Anchos de columnas de control */
-  thead th:nth-last-child(3), tbody td:nth-last-child(3){ width:150px } /* Estado */
-  thead th:nth-last-child(2), tbody td:nth-last-child(2){ width:320px } /* Observación */
-  thead th:nth-last-child(1), tbody td:nth-last-child(1){ width:260px } /* Evidencia */
+/* ===== Toolbar compacta ===== */
+.toolbar { gap: .6rem; flex-wrap: wrap; }
+.toolbar .left, .toolbar .right { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 
-  .section{background:rgba(34,197,94,.10); font-weight:800}
-  .muted{color:#cfd6ff99}
-  .alert-lite{background:rgba(252,165,165,.15); border:1px solid rgba(248,113,113,.35); color:#ffdede; border-radius:12px}
+/* Chips informativos */
+.badge-area {
+  background: #0e1525; border: 1px solid rgba(255,255,255,.15);
+  color: #d9e2ef; padding: .22rem .55rem; border-radius: 999px; font-weight: 800; font-size: .78rem;
+}
 
-  select, input[type="text"]{
-    width:100%; background:rgba(255,255,255,.10); color:#fff;
-    border:1px solid rgba(255,255,255,.18); border-radius:8px; padding:.35rem .5rem
-  }
-  input[type="file"]{ width:100% }
+/* Botones “pill” */
+.btnx {
+  --padY: .42rem; --padX: .7rem; --radius: 10px; --border: rgba(255,255,255,.18);
+  display: inline-flex; align-items: center; gap: .45rem;
+  padding: var(--padY) var(--padX); border-radius: var(--radius);
+  font-weight: 800; font-size: .86rem; line-height: 1;
+  border: 1px solid var(--border); background: #0f1520; color: #e7ecf4; text-decoration: none;
+}
+.btnx:hover { background: #141c2b; color: #f3f7fb; border-color: rgba(255,255,255,.28); }
+.btnx--accent { background: #16a34a; color: #04110a; border-color: #13853e; }
+.btnx--accent:hover { background: #22c55e; border-color: #1ea152; color: #031007; }
+.btnx--muted  { background: #0b111a; border-color: rgba(255,255,255,.15); }
 
-  /* Overlay spinner al guardar */
-  #overlay{
-    position:fixed; inset:0; background:rgba(0,0,0,.55);
-    display:none; align-items:center; justify-content:center; z-index:9999;
-    backdrop-filter: blur(2px);
-  }
-  #overlay.show{ display:flex; }
-  .spinner{
-    width:72px; height:72px; border-radius:50%;
-    border:6px solid rgba(255,255,255,.2);
-    border-top-color:#16a34a; animation: spin 1s linear infinite;
-  }
-  @keyframes spin { to{ transform: rotate(360deg); } }
+/* Dropdown oscuro compacto */
+.dropdown-menu-dark { --bs-dropdown-bg: #0e1525; --bs-dropdown-color: #e7ecf4; }
+.dropdown-item { font-weight: 700; font-size: .88rem; }
+.dropdown-header { color:#9fb3c8; font-weight:800; }
+
+/* Selectores compactos */
+.form-compact { display:flex; align-items:center; gap:.35rem; }
+.form-compact label { font-size:.78rem; color:#cbd5e1; }
+.form-compact .form-select { padding:.25rem .5rem; height: 32px; border-radius: 8px; font-size:.86rem; }
+
+/* Tabla */
+table{ width:100%; border-collapse:separate; border-spacing:0; }
+thead th{ position:sticky; top:0; z-index:3; background:#0b111a; color:#e7ecf4; border-bottom:1px solid rgba(255,255,255,.2); padding:12px; text-transform:uppercase; letter-spacing:.04em; font-weight:800; }
+tbody td{ padding:12px; border-bottom:1px solid rgba(255,255,255,.10); vertical-align:top; color:#d5deea; }
+tbody tr:nth-child(even){ background:rgba(255,255,255,.02) }
+tbody tr:hover{ background:rgba(255,255,255,.05) }
+.section{ background:linear-gradient(90deg, rgba(34,197,94,.18), rgba(34,197,94,.10)); color:#eaf7ee; font-weight:800; }
+
+@media (min-width: 1100px){
+  thead th:nth-last-child(3), tbody td:nth-last-child(3){ width:160px }
+  thead th:nth-last-child(2), tbody td:nth-last-child(2){ width:360px }
+  thead th:nth-last-child(1), tbody td:nth-last-child(1){ width:340px }
+}
+
+select, input[type="text"]{ width:100%; background:#0f1520; color:#e6edf7; border:1px solid rgba(255,255,255,.22); border-radius:10px; padding:.45rem .55rem; }
+input[type="file"]{ background:#0f1520; color:#e6edf7; border:1px solid rgba(255,255,255,.22); border-radius:10px; padding:.35rem .55rem; }
+#overlay{ position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:9999; }
+#overlay.show{ display:flex; }
+.spinner{ width:72px; height:72px; border-radius:50%; border:6px solid rgba(255,255,255,.2); border-top-color:#22c55e; animation: spin 1s linear infinite; }
+@keyframes spin { to{ transform: rotate(360deg); } }
+.sev-immediate td{ background: rgba(var(--sevRedRGB), var(--sevAlpha)) !important; border-left: 4px solid rgb(var(--sevRedRGB)); }
+.sev-program  td{ background: rgba(var(--sevYellowRGB), var(--sevAlpha)) !important; border-left: 4px solid rgb(var(--sevYellowRGB)); }
+.brand-hero .brand-title{ color:#f3f7fb } .brand-hero .brand-sub{ color:#b9c6d8 }
 </style>
 </head>
 <body>
 
-<!-- Overlay bloqueo -->
-<div id="overlay" aria-hidden="true">
-  <div class="spinner" role="status" aria-label="Guardando..."></div>
-</div>
+<div class="page-bg"></div><span class="mesh"></span><span class="mesh mesh--left"></span>
 
-<div class="d-flex align-items-center justify-content-between toolbar mb-2">
-  <div class="d-flex align-items-center gap-2">
-    <a class="btn btn-ghost" href="documentos.php">← Volver</a>
-    <span class="muted small"><?= e($rel) ?></span>
+<header class="brand-hero">
+  <div class="hero-inner container-fluid">
+    <img class="brand-logo" src="assets/img/escudo602sinfondo.png" alt="Escudo 602">
+    <div>
+      <div class="brand-title">Batallón de Comunicaciones 602</div>
+      <div class="brand-sub">“Hogar de las Comunicaciones Fijas del Ejército”</div>
+    </div>
+    <div class="brand-year"><?= date('Y') ?></div>
   </div>
-  <div class="d-flex align-items-center gap-2">
-    <span class="small">Modo números:</span>
-    <a class="btn btn-ghost" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>&setmode=title<?= $debugShowColor?'&showcolor=1':'' ?>">Nro como TÍTULO</a>
-    <a class="btn btn-ghost" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>&setmode=item<?= $debugShowColor?'&showcolor=1':'' ?>">Nro como ÍTEM</a>
-    <?php if(!$debugShowColor): ?>
-      <a class="btn btn-ghost" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>&showcolor=1">Ver color (debug)</a>
-    <?php else: ?>
-      <a class="btn btn-ghost btn-danger-ghost" href="ver_tabla.php?p=<?= rawurlencode($rel) ?>&s=<?= (int)$sheetIdx ?>">Ocultar color</a>
-    <?php endif; ?>
-    <?php if($pdf_exists): ?>
-      <a class="btn btn-ghost" target="_blank" href="../<?= e($pdf_rel) ?>">Abrir PDF</a>
-    <?php else: ?>
-      <button class="btn btn-ghost" disabled title="No encontré PDF junto al Excel">Abrir PDF</button>
-    <?php endif; ?>
-    <!-- Guardar todo (único) -->
-    <button form="bulkForm" class="btn btn-acc">Guardar todo</button>
+</header>
+
+<div class="page container-fluid">
+
+  <!-- Toolbar superior -->
+  <div class="d-flex align-items-center justify-content-between toolbar mb-3">
+    <div class="left">
+      <a class="btnx btnx--muted" href="<?= e($SCOPE['list_url']) ?>" title="Volver al listado">📁 Volver</a>
+      <a class="btnx btnx--muted" href="index.php?scope=<?= e($SCOPE['dash_scope']) ?>" title="Ir al Dashboard">🏠 Dashboard</a>
+
+      <span class="badge-area">Origen: <b><?= e($SCOPE['label']) ?></b></span>
+      <span class="badge-area text-truncate" title="<?= e($rel) ?>">Archivo: <b><?= e(basename($rel)) ?></b></span>
+      <?php if ($lastUpd): ?>
+        <span class="badge-area">Última actualización: <b><?= e(date('d/m/Y H:i', strtotime($lastUpd))) ?></b></span>
+      <?php endif; ?>
+
+      <?php if (!empty($sheetNames) && count($sheetNames)>1): ?>
+        <form method="get" class="form-compact">
+          <input type="hidden" name="p" value="<?= e($rel) ?>">
+          <?php if($debugShowColor): ?><input type="hidden" name="showcolor" value="1"><?php endif; ?>
+          <input type="hidden" name="pp" value="<?= (int)$perPage ?>">
+          <input type="hidden" name="page" value="<?= (int)$page ?>">
+          <label>Hoja:</label>
+          <select name="s" class="form-select form-select-sm" onchange="this.form.submit()">
+            <?php foreach($sheetNames as $i=>$nm): ?>
+              <option value="<?= (int)$i ?>" <?= $i===$sheetIdx?'selected':'' ?>><?= e($nm) ?></option>
+            <?php endforeach; ?>
+          </select>
+        </form>
+      <?php endif; ?>
+    </div>
+
+    <div class="right">
+      <!-- NUEVO: botón único “Formato de tabla” -->
+      <div class="dropdown">
+        <button class="btnx dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+          🧩 Formato de tabla
+        </button>
+        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end">
+          <li class="dropdown-header">Interpretación del Nro</li>
+          <li><a class="dropdown-item" href="ver_tabla.php?<?= $baseQS ?>&setmode=title&page=<?= (int)$page ?>">Nro como TÍTULO</a></li>
+          <li><a class="dropdown-item" href="ver_tabla.php?<?= $baseQS ?>&setmode=item&page=<?= (int)$page ?>">Nro como ÍTEM</a></li>
+          <li><hr class="dropdown-divider"></li>
+          <li class="dropdown-header">Filas coloreadas</li>
+          <?php if(!$debugShowColor): ?>
+            <li><a class="dropdown-item" href="ver_tabla.php?<?= $baseQS ?>&page=<?= (int)$page ?>&showcolor=1">Ver color (debug)</a></li>
+          <?php else: ?>
+            <li><a class="dropdown-item" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,false,$perPage) ?>&page=<?= (int)$page ?>">Ocultar color</a></li>
+          <?php endif; ?>
+        </ul>
+      </div>
+
+      <?php if($pdf_exists): ?>
+        <a class="btnx" target="_blank" href="../<?= e($pdf_rel) ?>" title="Abrir PDF adyacente">📄 PDF</a>
+      <?php else: ?>
+        <span class="btnx" style="opacity:.5; pointer-events:none;" title="No se encontró PDF">📄 PDF</span>
+      <?php endif; ?>
+
+      <button form="bulkForm" class="btnx btnx--accent" title="Guardar cambios de esta página">💾 Guardar</button>
+    </div>
   </div>
-</div>
 
-<?php if(!empty($err)): ?>
-  <div class="alert-lite p-3 mb-3">
-    <div class="fw-bold">No pude leer el archivo:</div>
-    <div><?= e($err) ?></div>
+  <!-- Controles de items por página -->
+  <div class="d-flex flex-wrap align-items-center justify-content-between mb-2">
+    <form method="get" class="form-compact">
+      <input type="hidden" name="p" value="<?= e($rel) ?>">
+      <input type="hidden" name="s" value="<?= (int)$sheetIdx ?>">
+      <?php if($debugShowColor): ?><input type="hidden" name="showcolor" value="1"><?php endif; ?>
+      <label>Ítems por página:</label>
+      <select name="pp" class="form-select form-select-sm" onchange="this.form.submit()">
+        <?php foreach($allowedPP as $pp): ?><option value="<?= $pp ?>" <?= $pp===$perPage?'selected':'' ?>><?= $pp ?></option><?php endforeach; ?>
+      </select>
+      <input type="hidden" name="page" value="1">
+    </form>
   </div>
-<?php endif; ?>
 
-<?php
-  $totalFilas = count($rows);
-  $coloreadas = 0; foreach($rowFill as $f){ if($f) $coloreadas++; }
-  if($debugShowColor){
-    echo '<div class="mb-2 muted">Filas totales: '.$totalFilas.' · Filas con color: '.$coloreadas.' · (mostrando todas)</div>';
-  } else {
-    echo '<div class="mb-2 muted">Filas totales: '.$totalFilas.' · Ocultando '.$coloreadas.' con color</div>';
-  }
-?>
-
-<form id="bulkForm" action="save_check_bulk.php" method="post" enctype="multipart/form-data" class="box">
-  <!-- Importante: estos hidden NO deben deshabilitarse -->
-  <input type="hidden" name="file_rel" value="<?= e($rel) ?>">
-  <input type="hidden" name="sheet" value="<?= (int)$sheetIdx ?>">
-  <input type="hidden" name="showcolor" value="<?= $debugShowColor?'1':'0' ?>">
-
-  <div style="overflow:auto; max-height:78vh;">
-    <table>
-      <thead>
-        <tr>
-          <?php foreach($headers as $h): ?><th><?= e($h) ?></th><?php endforeach; ?>
-          <th>Estado</th>
-          <th>Observación</th>
-          <th>Evidencia</th>
-        </tr>
-      </thead>
-      <tbody>
-      <?php
-        $rowIndex=1; // índice interno (no se muestra)
-        foreach($rows as $i=>$r){
-          if(!$debugShowColor && !empty($rowFill[$i])) continue;
-
-          while(count($r)<count($headers)) $r[]='';
-          if(is_title_row($r,$mode)){
-            $title=trim(($r[0]??'').' '.($r[1]??''));
-            if($title==='') $title=trim((string)($r[1]??''));
-            echo '<tr class="section"><td colspan="'.count($headers).'">'.e($title).'</td><td colspan="3"></td></tr>';
-            $rowIndex++; continue;
+  <!-- Paginador -->
+  <?php if($totalPages>1): ?>
+    <nav class="mb-2">
+      <ul class="pagination pagination-sm">
+        <li class="page-item <?= $page<=1?'disabled':'' ?>">
+          <a class="page-link" href="ver_tabla.php?<?= $baseQS ?>&page=<?= max(1,$page-1) ?>">«</a>
+        </li>
+        <?php
+          $win=2;
+          $from=max(1,$page-$win); $to=min($totalPages,$page+$win);
+          if($from>1){ echo '<li class="page-item"><a class="page-link" href="ver_tabla.php?'.$baseQS.'&page=1">1</a></li>'; if($from>2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>'; }
+          for($p=$from;$p<=$to;$p++){
+            $act = $p===$page?' active':'';
+            echo '<li class="page-item'.$act.'"><a class="page-link" href="ver_tabla.php?'.$baseQS.'&page='.$p.'">'.$p.'</a></li>';
           }
+          if($to<$totalPages){ if($to<$totalPages-1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>'; echo '<li class="page-item"><a class="page-link" href="ver_tabla.php?'.$baseQS.'&page='.$totalPages.'">'.$totalPages.'</a></li>'; }
+        ?>
+        <li class="page-item <?= $page>=$totalPages?'disabled':'' ?>">
+          <a class="page-link" href="ver_tabla.php?<?= $baseQS ?>&page=<?= min($totalPages,$page+1) ?>">»</a>
+        </li>
+      </ul>
+    </nav>
+  <?php endif; ?>
 
-          $saved = $prefill[$rowIndex] ?? null;
-          $est = $saved['estado'] ?? '';
-          $obs = $saved['observacion'] ?? '';
-          $ev  = $saved['evidencia_path'] ?? '';
+  <!-- Overlay bloqueo -->
+  <div id="overlay" aria-hidden="true"><div class="spinner" role="status" aria-label="Guardando..."></div></div>
 
-          echo '<tr>';
-          foreach($r as $v){ echo '<td>'.e($v).'</td>'; }
-          echo '<td><select name="estado['.$rowIndex.']" class="form-select form-select-sm" style="background:rgba(255,255,255,.10); color:#fff; border-color:rgba(255,255,255,.18)">';
-          echo '<option value="" '.($est===''?'selected':'').'>—</option>';
-          echo '<option value="si" '.($est==='si'?'selected':'').'>Sí</option>';
-          echo '<option value="no" '.($est==='no'?'selected':'').'>No</option>';
-          echo '</select></td>';
-          echo '<td><input class="form-control form-control-sm" type="text" name="observacion['.$rowIndex.']" value="'.e($obs).'" placeholder="Escribir..."></td>';
-          echo '<td><input class="form-control form-control-sm" type="file" name="evidencia['.$rowIndex.']" accept=".jpg,.jpeg,.png,.pdf,.webp">';
-          if($ev){ echo ' <a class="ms-2" href="../'.e($ev).'" target="_blank">Ver</a>'; }
-          echo '</td>';
-          echo '</tr>';
-          $rowIndex++;
-        }
+  <form id="bulkForm" action="save_check_bulk.php" method="post" enctype="multipart/form-data" class="box">
+    <input type="hidden" name="file_rel" value="<?= e($rel) ?>">
+    <input type="hidden" name="sheet" value="<?= (int)$sheetIdx ?>">
+    <input type="hidden" name="showcolor" value="<?= $debugShowColor?'1':'0' ?>">
+    <input type="hidden" name="pp" value="<?= (int)$perPage ?>">
+    <input type="hidden" name="page" value="<?= (int)$page ?>">
 
-        if($rowIndex===1){
-          echo '<tr><td colspan="'.(count($headers)+3).'" class="muted">No se encontraron filas para mostrar. Probá “Ver color (debug)” o revisá la hoja.</td></tr>';
-        }
-      ?>
-      </tbody>
-    </table>
-  </div>
-</form>
+    <div style="overflow:auto; max-height:72vh;">
+      <table>
+        <thead>
+          <tr>
+            <?php foreach($headers as $h): ?><th><?= e($h) ?></th><?php endforeach; ?>
+            <th>Estado</th>
+            <th>Observación</th>
+            <th>Evidencia</th>
+          </tr>
+        </thead>
+        <tbody>
+        <?php
+          if(empty($render)){
+            echo '<tr><td colspan="'.(count($headers)+3).'" class="text-muted">No hay filas para esta página.</td></tr>';
+          } else {
+            foreach($render as $v){
+              if(!empty($v['section'])){
+                $title = trim($v['title'] ?? ''); if($title==='') $title='—';
+                echo '<tr class="section"><td colspan="'.count($headers).'">'.e($title).'</td><td colspan="3"></td></tr>';
+                continue;
+              }
+              $r = $v['cols']; $rowIdx=(int)$v['row_idx']; $est=$v['estado']; $obs=$v['observacion']; $ev=$v['ev']; $sevClass=$v['sevClass'];
+              echo '<tr'.($sevClass ? ' class="'.$sevClass.'"' : '').'>';
+              foreach($r as $vv){ echo '<td>'.e($vv).'</td>'; }
+
+              echo '<td><select name="estado['.$rowIdx.']" class="form-select form-select-sm">';
+              echo '<option value="" '.($est===''?'selected':'').'>—</option>';
+              echo '<option value="si" '.($est==='si'?'selected':'').'>Sí</option>';
+              echo '<option value="no" '.($est==='no'?'selected':'').'>No</option>';
+              echo '</select></td>';
+
+              echo '<td><input class="form-control form-control-sm" type="text" name="observacion['.$rowIdx.']" value="'.e($obs).'" placeholder="Escribir..."></td>';
+
+              echo '<td><div class="d-flex align-items-center gap-2 flex-wrap">';
+              echo   '<input class="form-control form-control-sm" type="file" name="evidencia['.$rowIdx.']" accept=".jpg,.jpeg,.png,.pdf,.webp">';
+              if ($ev) {
+                $qsBack = $baseQS.'&page='.(int)$page;
+                echo '<a class="btn btn-sm btn-outline-info" href="../'.e($ev).'" target="_blank">Ver</a>';
+                echo '<a class="btn btn-sm btn-outline-danger" href="delete_evidencia.php?row='.$rowIdx.'&'.$qsBack.'" onclick="return confirm(\'¿Eliminar la evidencia de la fila '.$rowIdx.'?\')">Eliminar</a>';
+              } else {
+                echo '<span class="text-muted">Sin arc…nados</span>';
+              }
+              echo '</div></td>';
+
+              echo '</tr>';
+            }
+          }
+        ?>
+        </tbody>
+      </table>
+    </div>
+  </form>
+
+</div>
 
 <script>
   (function(){
     const form = document.getElementById('bulkForm');
     const overlay = document.getElementById('overlay');
     if(!form || !overlay) return;
-
     form.addEventListener('submit', function(){
-      // Mostrar overlay y bloquear interacción
       overlay.classList.add('show');
       overlay.setAttribute('aria-hidden','false');
       document.body.setAttribute('aria-busy','true');
-
-      // Opcional: deshabilitar botones y selects/inputs visibles (pero NO hidden)
-      const toDisable = document.querySelectorAll(
-        'button, a.btn-acc, a.btn-ghost, select, textarea, input:not([type="hidden"])'
-      );
-      toDisable.forEach(el => {
-        if (el.tagName === 'INPUT' && el.type === 'file') return; // no hace falta
-        if ('disabled' in el) el.disabled = true;
-        el.classList.add('pe-none');
-      });
+      const toDisable = document.querySelectorAll('button, a.btnx');
+      toDisable.forEach(el => { if ('disabled' in el) el.disabled = true; });
     });
   })();
 </script>
+<!-- Necesario para dropdowns -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
