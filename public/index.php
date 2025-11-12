@@ -40,8 +40,13 @@ $ASSETS_URL = ($APP_URL === '' ? '' : $APP_URL) . '/assets';
 $IMG_BG = $ASSETS_URL . '/img/fondo.png';
 $ESCUDO = $ASSETS_URL . '/img/escudo_bcom602.png';
 
-/* ===== URL de documentos ===== */
-$DOC_URL = $PUBLIC_URL . '/' . $ACTIVE['route'] . '?area=S1';
+/* ===== URL de documentos (según scope) ===== */
+if ($scope === 'lista_de_control') {
+  $DOC_URL = $PUBLIC_URL . '/' . $ACTIVE['route'] . '?area=S1';
+} else {
+  // Última inspección y Visitas no usan áreas S1..S4
+  $DOC_URL = $PUBLIC_URL . '/' . $ACTIVE['route'];
+}
 
 /* ===== Helpers KPI ===== */
 function kpi_global(PDO $pdo, string $prefix): array {
@@ -87,13 +92,64 @@ function kpi_por_area(PDO $pdo, string $prefix): array {
   return $out;
 }
 
+/* Variante “single” (sin S1..S4) para Última inspección y Visitas */
+function kpi_single(PDO $pdo, string $prefix, string $label): array {
+  $like = "storage/{$prefix}/%";
+  $q1 = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE file_rel LIKE ?");
+  $q2 = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE estado='si' AND file_rel LIKE ?");
+  $q1->execute([$like]); $q2->execute([$like]);
+  $cnt = (int)($q1->fetchColumn() ?: 0);
+  $cum = (int)($q2->fetchColumn() ?: 0);
+  return [
+    'rows' => [[
+      'label'      => $label,
+      'controles'  => $cnt,
+      'cumplidos'  => $cum,
+      'pendientes' => max(0,$cnt-$cum),
+      'porc'       => $cnt?round($cum*100.0/$cnt,1):0.0
+    ]]
+  ];
+}
+
 /* ===== Cálculos ===== */
 $g = kpi_global($pdo, $PREFIX);
 $tot_controles = $g['tot'];
 $tot_cumplidos = $g['cumplidos'];
 $tot_pend      = $g['pend'];
 $porc          = $g['porc'];
-$areas_stats   = kpi_por_area($pdo, $PREFIX);
+
+/* Data rows para la tabla inferior (depende del scope) */
+$table_rows = [];
+$uses_areas = ($scope === 'lista_de_control');
+
+if ($uses_areas) {
+  $areas_stats = kpi_por_area($pdo, $PREFIX);
+  foreach (['S1','S2','S3','S4'] as $ax) {
+    $st = $areas_stats[$ax];
+    $table_rows[] = [
+      'label'      => $ax,
+      'controles'  => $st['controles'],
+      'cumplidos'  => $st['cumplidos'],
+      'pendientes' => $st['pendientes'],
+      'porc'       => $st['porc'],
+      'href'       => $SCOPES['lista_de_control']['route'].'?area='.$ax
+    ];
+  }
+} else {
+  // Única fila: “Observaciones” para Última inspección, y una genérica para Visitas
+  $label = ($scope === 'ultima_inspeccion') ? 'Observaciones' : 'Visitas';
+  $single = kpi_single($pdo, $PREFIX, $label);
+  foreach ($single['rows'] as $r) {
+    $table_rows[] = [
+      'label'      => $r['label'],
+      'controles'  => $r['controles'],
+      'cumplidos'  => $r['cumplidos'],
+      'pendientes' => $r['pendientes'],
+      'porc'       => $r['porc'],
+      'href'       => $SCOPES[$scope]['route'] // sin ?area
+    ];
+  }
+}
 
 /* ===== Grafana (embed opcional) ===== */
 $grafana_line = 'http://localhost:3000/d/adfnc82/porcentaje-de-tareas-realizadas?orgId=1&from=now-30d&to=now&viewPanel=panel-1';
@@ -124,11 +180,20 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
   .title{ font-weight:800; font-size:1.05rem; margin:0 0 .4rem 0 }
   .muted{ color:var(--mut) }
 
-  /* Tabs filtro */
-  .tabs{ display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 18px }
-  .tab{ border:1px solid rgba(255,255,255,.18); background:rgba(15,17,23,.6);
-        color:#e9eef5; padding:.45rem .9rem; border-radius:999px; font-weight:800; text-decoration:none; }
-  .tab:hover{ background:rgba(255,255,255,.08) }
+  /* Tabs filtro — MÁS GRANDES */
+  .tabs{ display:flex; gap:10px; flex-wrap:wrap; margin:12px 0 18px }
+  .tab{
+    border:1px solid rgba(255,255,255,.18);
+    background:rgba(15,17,23,.65);
+    color:#e9eef5;
+    padding:.6rem 1.2rem;              /* <-- más grande */
+    border-radius:999px;
+    font-weight:900;
+    font-size:1rem;                     /* <-- más grande */
+    text-decoration:none;
+    letter-spacing:.01em;
+  }
+  .tab:hover{ background:rgba(255,255,255,.10) }
   .tab.active{ background:#16a34a; border-color:#16a34a; color:#08140c; }
 
   .gauge{ --p:0; width:220px; height:220px; border-radius:999px;
@@ -141,10 +206,10 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
   .g-cap{ text-align:center; margin-top:.5rem; font-weight:700; color:#d6ffe1 }
 
   .bar{ display:flex; align-items:center; gap:.6rem; }
-  .bar .label{ width:180px; color:#e6f4ea; font-weight:700 }
+  .bar .label{ width:200px; color:#e6f4ea; font-weight:700 }
   .bar .track{ flex:1; height:12px; background:#1b222c; border-radius:999px; overflow:hidden; border:1px solid #2a3140 }
   .bar .fill{ height:100%; background:linear-gradient(90deg,#1cd259,#15a34a) }
-  .bar .pct{ width:52px; text-align:right; color:#bfe8cb; font-weight:800 }
+  .bar .pct{ width:60px; text-align:right; color:#bfe8cb; font-weight:800 }
   .sig{ width:10px; height:10px; border-radius:999px }
   .sig.ok{ background:#16a34a } .sig.warn{ background:#f59e0b } .sig.bad{ background:#ef4444 }
 
@@ -192,24 +257,37 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
 
     <div class="panel link" data-href="<?= e($DOC_URL) ?>" style="grid-column: span 5;">
       <h3 class="title">Cumplimiento por Área</h3>
-      <div class="d-flex flex-column gap-2">
-        <?php
-          $aliases=['S1'=>'Personal (S-1)','S2'=>'Inteligencia (S-2)','S3'=>'Operaciones (S-3)','S4'=>'Material (S-4)'];
-          foreach(['S1','S2','S3','S4'] as $ax):
-            $st=$areas_stats[$ax]; $pct=$st['porc'];
-            $sig = ($pct>=90?'ok':($pct>=75?'warn':'bad'));
-        ?>
-        <div class="bar">
-          <div class="label"><?= e($aliases[$ax]) ?></div>
-          <div class="sig <?= $sig ?>"></div>
-          <div class="track"><div class="fill" style="width:<?= (float)$pct ?>%"></div></div>
-          <div class="pct"><?= $pct ?>%</div>
+      <?php if ($uses_areas): ?>
+        <div class="d-flex flex-column gap-2">
+          <?php
+            $aliases=['S1'=>'Personal (S-1)','S2'=>'Inteligencia (S-2)','S3'=>'Operaciones (S-3)','S4'=>'Material (S-4)'];
+            foreach($table_rows as $r):
+              $pct = $r['porc'];
+              $sig = ($pct>=90?'ok':($pct>=75?'warn':'bad'));
+          ?>
+          <div class="bar">
+            <div class="label"><?= e($aliases[$r['label']] ?? $r['label']) ?></div>
+            <div class="sig <?= $sig ?>"></div>
+            <div class="track"><div class="fill" style="width:<?= (float)$pct ?>%"></div></div>
+            <div class="pct"><?= $pct ?>%</div>
+          </div>
+          <?php endforeach; ?>
         </div>
-        <?php endforeach; ?>
-      </div>
-      <div class="mt-3 muted" style="font-size:.9rem">
-        <span class="sig ok"></span> OK (≥90%) &nbsp; <span class="sig warn"></span> Atención (75–89%) &nbsp; <span class="sig bad"></span> Crítico (&lt;75%)
-      </div>
+        <div class="mt-3 muted" style="font-size:.9rem">
+          <span class="sig ok"></span> OK (≥90%) &nbsp; <span class="sig warn"></span> Atención (75–89%) &nbsp; <span class="sig bad"></span> Crítico (&lt;75%)
+        </div>
+      <?php else: ?>
+        <!-- Cuando no hay S1..S4, mostramos una única barra (p.ej., “Observaciones”) -->
+        <?php $r=$table_rows[0] ?? ['label'=>'Observaciones','porc'=>0]; $pct=$r['porc']; ?>
+        <div class="d-flex flex-column gap-2">
+          <div class="bar">
+            <div class="label"><?= e($r['label']) ?></div>
+            <div class="sig <?= ($pct>=90?'ok':($pct>=75?'warn':'bad')) ?>"></div>
+            <div class="track"><div class="fill" style="width:<?= (float)$pct ?>%"></div></div>
+            <div class="pct"><?= $pct ?>%</div>
+          </div>
+        </div>
+      <?php endif; ?>
     </div>
 
     <div class="panel" style="grid-column: span 3;">
@@ -220,7 +298,7 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
         <div style="background:#052e1b; border-radius:8px; padding:.5rem .7rem;">✅ Capacitación S-2 completada</div>
       </div>
       <div class="mt-3">
-        <a class="btn-acc btn btn-sm" href="<?= e($DOC_URL) ?>">Ver documentos por área</a>
+        <a class="btn-acc btn btn-sm" href="<?= e($DOC_URL) ?>">Ver documentos</a>
       </div>
     </div>
 
@@ -241,7 +319,7 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
         <table class="tbl">
           <thead>
             <tr>
-              <th>Área</th>
+              <th><?= $uses_areas ? 'Área' : 'Documento' ?></th>
               <th class="text-end">Controles</th>
               <th class="text-end">Cumplidos</th>
               <th class="text-end">Pendientes</th>
@@ -251,20 +329,12 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
             </tr>
           </thead>
           <tbody>
-          <?php
-            function url_editar_area(string $scopeRoute, string $ax): string {
-              return $scopeRoute . '?area=' . urlencode($ax);
-            }
-            foreach(['S1','S2','S3','S4'] as $ax):
-              $st  = $areas_stats[$ax];
-              $pct = $st['porc'];
-              $url = url_editar_area($ACTIVE['route'], $ax);
-          ?>
+          <?php foreach($table_rows as $r): $pct=$r['porc']; ?>
             <tr>
-              <td><b><?= e($ax) ?></b></td>
-              <td class="text-end"><?= (int)$st['controles'] ?></td>
-              <td class="text-end"><?= (int)$st['cumplidos'] ?></td>
-              <td class="text-end"><?= (int)$st['pendientes'] ?></td>
+              <td><b><?= e($r['label']) ?></b></td>
+              <td class="text-end"><?= (int)$r['controles'] ?></td>
+              <td class="text-end"><?= (int)$r['cumplidos'] ?></td>
+              <td class="text-end"><?= (int)$r['pendientes'] ?></td>
               <td>
                 <div class="bar">
                   <div class="track"><div class="fill" style="width:<?= (float)$pct ?>%"></div></div>
@@ -273,7 +343,7 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
               </td>
               <td class="text-end"><b><?= $pct ?>%</b></td>
               <td class="text-center">
-                <a class="btn-acc btn btn-sm" href="<?= e($url) ?>">Editar</a>
+                <a class="btn-acc btn btn-sm" href="<?= e($r['href']) ?>">Editar</a>
               </td>
             </tr>
           <?php endforeach; ?>

@@ -142,11 +142,9 @@ $ESCUDO = $ASSETS_URL . '/img/escudo_bcom602.png';
         <table>
           <thead>
             <tr>
-              <th style="width:68px">EXT</th>
               <th>ARCHIVO</th>
               <th>UBICACIÓN</th>
               <th style="width:220px">PROGRESO</th>
-              <th style="width:120px" class="text-end">TAMAÑO</th>
               <th style="width:160px">MODIFICADO</th>
               <th style="width:130px">ACCIÓN</th>
             </tr>
@@ -168,7 +166,6 @@ $ESCUDO = $ASSETS_URL . '/img/escudo_bcom602.png';
               $qs='p='.rawurlencode($r['rel']);
           ?>
             <tr>
-              <td><span class="badge-ext"><?= e($r['ext']) ?></span></td>
               <td class="cell-trunc" title="<?= e($r['name']) ?>"><?= e($r['name']) ?></td>
               <td class="cell-trunc"><?= e($r['loc']) ?></td>
               <td>
@@ -177,7 +174,6 @@ $ESCUDO = $ASSETS_URL . '/img/escudo_bcom602.png';
                   <span class="b-pill <?= $badge ?> pct"><?= $pct ?>%</span>
                 </div>
               </td>
-              <td class="text-end"><?= e(human_size($r['size'])) ?></td>
               <td><?= e(date('d/m/Y H:i',$r['mtime'])) ?></td>
               <td class="d-flex gap-2">
                 <a class="btn btn-ed btn-acc-sm" href="ver_tabla.php?<?= $qs ?>">Editar</a>
