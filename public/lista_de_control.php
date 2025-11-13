@@ -1,12 +1,8 @@
 <?php
-// public/lista_de_control.php — Listado por área S1–S4 en /storage/listas_control
+// public/lista_de_control.php — Listado por área S1–S4 en /storage/listas_control (progreso desde DB)
 require_once __DIR__ . '/../config/db.php';
 
 function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
-function human_size($bytes){
-  $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<count($u)-1){ $bytes/=1024; $i++; }
-  return round($bytes,1).' '.$u[$i];
-}
 
 /* ===== Config ===== */
 const BASE_PREFIX = 'listas_control';
@@ -16,6 +12,7 @@ $ALIASES = ['S1'=>'Personal (S-1)','S2'=>'Inteligencia (S-2)','S3'=>'Operaciones
 $area = $_GET['area'] ?? 'S1';
 if(!in_array($area,$AREAS,true)) $area='S1';
 
+/* ===== Paths ===== */
 $projectBase = realpath(__DIR__ . '/..');
 $baseDir     = realpath($projectBase . '/storage/' . BASE_PREFIX);
 $root        = $baseDir ? realpath($baseDir . '/' . $area) : false;
@@ -23,7 +20,7 @@ if(!$baseDir || !$root || strncmp($root,$baseDir,strlen($baseDir))!==0){
   http_response_code(404); echo "Carpeta no encontrada"; exit;
 }
 
-/* ===== Recorrer archivos XLSX ===== */
+/* ===== Recorrer XLSX del área (solo archivos .xlsx) ===== */
 $rows=[];
 $rii = new RecursiveIteratorIterator(
   new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
@@ -33,28 +30,30 @@ foreach($rii as $f){
   if(!$f->isFile()) continue;
   if(strtolower($f->getExtension())!=='xlsx') continue;
   $abs = $f->getPathname();
-  $rel = str_replace('\\','/', substr($abs, strlen($projectBase)+1));
+  $rel = str_replace('\\','/', substr($abs, strlen($projectBase)+1)); // ruta relativa al proyecto
   $sub = substr($abs, strlen($root)+1);
-  $loc = str_replace('\\','/', dirname($sub)); if($loc === '.') $loc='';
+  $loc = str_replace('\\','/', dirname($sub));
+  if($loc === '.' ) $loc='';
   $rows[] = [
-    'ext'=>'XLSX','name'=>$f->getFilename(),'rel'=>$rel,
-    'loc'=>($loc? $loc.'/' : ''),'size'=>$f->getSize(),'mtime'=>$f->getMTime(),
+    'name'=>$f->getFilename(),
+    'rel'=>$rel,
+    'loc'=>($loc? $loc.'/' : ''),
+    'mtime'=>$f->getMTime(),
   ];
 }
 usort($rows, fn($a,$b)=>strcasecmp($a['loc'].$a['name'], $b['loc'].$b['name']));
 
-/* % por archivo */
+/* ===== Progreso por archivo (desde DB checklist) ===== */
 $stTot = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE file_rel = ?");
 $stOk  = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE file_rel = ? AND estado='si'");
 function pct_class($p){ return $p>=90?'ok':($p>=75?'warn':'bad'); }
 
-/* ===== Rutas de assets como en index.php ===== */
+/* ===== Assets (coherentes con index) ===== */
 $PUBLIC_URL = rtrim(str_replace('\\','/', dirname($_SERVER['SCRIPT_NAME'] ?? $_SERVER['PHP_SELF'])), '/');
 $APP_URL    = rtrim(str_replace('\\','/', dirname($PUBLIC_URL)), '/');
 $ASSETS_URL = ($APP_URL === '' ? '' : $APP_URL) . '/assets';
-
-$IMG_BG = $ASSETS_URL . '/img/fondo.png';
-$ESCUDO = $ASSETS_URL . '/img/escudo_bcom602.png';
+$IMG_BG     = $ASSETS_URL . '/img/fondo.png';
+$ESCUDO     = $ASSETS_URL . '/img/escudo_bcom602.png';
 ?>
 <!doctype html>
 <html lang="es">
@@ -65,36 +64,24 @@ $ESCUDO = $ASSETS_URL . '/img/escudo_bcom602.png';
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link rel="stylesheet" href="assets/css/theme-602.css">
 <style>
-  /* === mismo fondo que index.php === */
   body{
     background: url("<?= e($IMG_BG) ?>") no-repeat center center fixed;
-    background-size: cover;
-    background-attachment: fixed;
-    background-color:#0f1117;
-    color:#e9eef5;
+    background-size: cover; background-attachment: fixed;
+    background-color:#0f1117; color:#e9eef5; margin:0; padding:0;
     font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;
-    margin:0; padding:0;
   }
-
   .page-wrap{padding:20px;}
   .container-fluid{max-width:1600px;margin:auto;}
-
   .table-wrap{
-    background:rgba(15,17,23,.88);
-    border:1px solid rgba(255,255,255,.12);
-    border-radius:16px;
-    padding:8px;
-    backdrop-filter: blur(6px);
+    background:rgba(15,17,23,.88); border:1px solid rgba(255,255,255,.12);
+    border-radius:16px; padding:8px; backdrop-filter: blur(6px);
     box-shadow:0 10px 24px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05);
   }
-
   table{width:100%;border-collapse:collapse;}
   th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,.12);vertical-align:middle;}
   thead th{background:#11151d;text-transform:uppercase;letter-spacing:.04em;font-weight:800;position:sticky;top:0;z-index:2;}
   .group-row{background:#0f2018;font-weight:700;}
   .cell-trunc{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px;}
-
-  .badge-ext{display:inline-block;min-width:44px;text-align:center;padding:.2rem .5rem;border-radius:8px;background:#0b5;font-weight:800;}
 
   .prog{display:flex;align-items:center;gap:.6rem;}
   .track{flex:1;height:12px;background:#1b222c;border-radius:999px;overflow:hidden;border:1px solid #2a3140;}

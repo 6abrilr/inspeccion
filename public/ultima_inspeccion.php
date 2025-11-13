@@ -3,18 +3,15 @@
 require_once __DIR__ . '/../config/db.php';
 
 function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
-function human_size($bytes){
-  $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<count($u)-1){ $bytes/=1024; $i++; }
-  return round($bytes,1).' '.$u[$i];
-}
 
 /* ===== Config ===== */
 const BASE_PREFIX = 'ultima_inspeccion'; // carpeta en /storage
+
 $projectBase = realpath(__DIR__ . '/..');
 $baseDir     = realpath($projectBase . '/storage/' . BASE_PREFIX);
 if(!$baseDir){ http_response_code(404); echo "No existe /storage/".BASE_PREFIX; exit; }
 
-/* Subcarpeta (primer nivel) opcional */
+/* Subcarpeta (primer nivel) opcional para tabs */
 $sub = $_GET['sub'] ?? '';
 $sub = trim(str_replace(['..','\\'], ['','/'], $sub), '/');
 $root = $baseDir;
@@ -23,7 +20,7 @@ if ($sub !== '') {
   if ($try && str_starts_with($try, $baseDir)) $root = $try;
 }
 
-/* Descubrir subcarpetas nivel 1 para pestañas */
+/* Tabs: todas las subcarpetas de primer nivel */
 $tabs = ['' => '(Todos)'];
 $it = new DirectoryIterator($baseDir);
 foreach ($it as $entry) {
@@ -40,28 +37,29 @@ $rii = new RecursiveIteratorIterator(
 foreach($rii as $f){
   if(!$f->isFile()) continue;
   if(strtolower($f->getExtension())!=='xlsx') continue;
+
   $abs = $f->getPathname();
   $rel = str_replace('\\','/', substr($abs, strlen($projectBase)+1)); // relativo al proyecto
+
   $subPath = str_replace('\\','/', substr($abs, strlen($root)+1));
   $loc = dirname($subPath);
   if($loc === '.' || $loc === DIRECTORY_SEPARATOR) $loc = '';
+
   $rows[] = [
-    'ext'=>'XLSX',
     'name'=>$f->getFilename(),
     'rel'=>$rel,
-    'loc'=>($sub ? $sub.'/' : '').($loc && $loc!=='/' ? $loc.'/' : ''),
-    'size'=>$f->getSize(),
+    'loc'=>($sub ? $sub.'/' : '').($loc ? $loc.'/' : ''),
     'mtime'=>$f->getMTime(),
   ];
 }
 usort($rows, fn($a,$b)=>strcasecmp($a['loc'].$a['name'], $b['loc'].$b['name']));
 
-/* % por archivo */
+/* ===== Progreso por archivo (DB checklist) ===== */
 $stTot = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE file_rel = ?");
 $stOk  = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE file_rel = ? AND estado='si'");
 function pct_class($p){ return $p>=90?'ok':($p>=75?'warn':'bad'); }
 
-/* ===== Rutas de assets como en index.php ===== */
+/* ===== Assets ===== */
 $PUBLIC_URL = rtrim(str_replace('\\','/', dirname($_SERVER['SCRIPT_NAME'] ?? $_SERVER['PHP_SELF'])), '/');
 $APP_URL    = rtrim(str_replace('\\','/', dirname($PUBLIC_URL)), '/');
 $ASSETS_URL = ($APP_URL === '' ? '' : $APP_URL) . '/assets';
@@ -77,11 +75,9 @@ $ESCUDO     = $ASSETS_URL . '/img/escudo_bcom602.png';
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link rel="stylesheet" href="assets/css/theme-602.css">
 <style>
-  /* === mismo fondo y estilo que lista_de_control/index === */
   body{
     background: url("<?= e($IMG_BG) ?>") no-repeat center center fixed;
-    background-size: cover;
-    background-attachment: fixed;
+    background-size: cover; background-attachment: fixed;
     background-color:#0f1117; color:#e9eef5;
     font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; margin:0; padding:0;
   }
@@ -97,7 +93,6 @@ $ESCUDO     = $ASSETS_URL . '/img/escudo_bcom602.png';
   thead th{background:#11151d;text-transform:uppercase;letter-spacing:.04em;font-weight:800;position:sticky;top:0;z-index:2;}
   .group-row{background:#0f2018;font-weight:700;}
   .cell-trunc{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px;}
-  .badge-ext{display:inline-block;min-width:44px;text-align:center;padding:.2rem .5rem;border-radius:8px;background:#0b5;font-weight:800;}
   .prog{display:flex;align-items:center;gap:.6rem;}
   .track{flex:1;height:12px;background:#1b222c;border-radius:999px;overflow:hidden;border:1px solid #2a3140;}
   .fill{height:100%;background:linear-gradient(90deg,#1cd259,#15a34a);}
@@ -107,7 +102,6 @@ $ESCUDO     = $ASSETS_URL . '/img/escudo_bcom602.png';
   .b-bad{background:#2a1113;color:#fca5a5;border-color:#7f1d1d;}
   .pct{width:62px;text-align:right;color:#bfe8cb;font-weight:800;}
   .btn-acc{background:#16a34a;border:none;color:#fff;border-radius:12px;font-weight:800;padding:.45rem .9rem;}
-  .btn-acc:hover{background:#22c55e;}
   .btn-acc-sm{font-size:.85rem;padding:.32rem .56rem;border-radius:10px;}
   .btn-ed{background:#0ea5e9;border:none;color:#001018;font-weight:800;border-radius:10px;padding:.32rem .56rem;}
   .btn-ed:hover{background:#38bdf8;}

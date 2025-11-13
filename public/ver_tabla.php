@@ -502,7 +502,6 @@ input[type="file"]{
       <div class="brand-title">Batallón de Comunicaciones 602</div>
       <div class="brand-sub">“Hogar de las Comunicaciones Fijas del Ejército”</div>
     </div>
-    <div class="brand-year"><?= date('Y') ?></div>
   </div>
 </header>
 

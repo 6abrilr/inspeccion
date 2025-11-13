@@ -1,5 +1,5 @@
 <?php
-// public/index.php — Dashboard con filtro (Última / Visitas / Listas) y rutas separadas
+// public/index.php — Dashboard con 3 bloques: Global, Sistema activo, Críticos (chips por área/subcarpeta)
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/ui.php';
 
@@ -32,7 +32,7 @@ if (!isset($SCOPES[$scope])) $scope = 'ultima_inspeccion';
 $ACTIVE = $SCOPES[$scope];
 $PREFIX = $ACTIVE['prefix'];
 
-/* ===== Rutas de assets (resuelve correctamente desde /public) ===== */
+/* ===== Rutas de assets ===== */
 $PUBLIC_URL = rtrim(str_replace('\\','/', dirname($_SERVER['SCRIPT_NAME'] ?? $_SERVER['PHP_SELF'])), '/');
 $APP_URL    = rtrim(str_replace('\\','/', dirname($PUBLIC_URL)), '/');
 $ASSETS_URL = ($APP_URL === '' ? '' : $APP_URL) . '/assets';
@@ -44,13 +44,11 @@ $ESCUDO = $ASSETS_URL . '/img/escudo_bcom602.png';
 if ($scope === 'lista_de_control') {
   $DOC_URL = $PUBLIC_URL . '/' . $ACTIVE['route'] . '?area=S1';
 } else {
-  // Última inspección y Visitas no usan áreas S1..S4
   $DOC_URL = $PUBLIC_URL . '/' . $ACTIVE['route'];
 }
 
 /* ===== Helpers KPI ===== */
-function kpi_global(PDO $pdo, string $prefix): array {
-  $like = "storage/{$prefix}/%";
+function kpi_from_like(PDO $pdo, string $like): array {
   $qTot = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE file_rel LIKE ?");
   $qTot->execute([$like]);
   $tot = (int)($qTot->fetchColumn() ?: 0);
@@ -73,57 +71,116 @@ function kpi_global(PDO $pdo, string $prefix): array {
   return compact('tot','cumplidos','pend','porc','si','no','nr');
 }
 
+/* Global (todos los sistemas) */
+function kpi_global_all(PDO $pdo): array {
+  $likes = [
+    "storage/ultima_inspeccion/%",
+    "storage/listas_control/%",
+    "storage/visitas_de_estado_mayor/%",
+  ];
+  $tot=$cum=0;
+  foreach($likes as $lk){
+    $k = kpi_from_like($pdo, $lk);
+    $tot += $k['tot']; $cum += $k['cumplidos'];
+  }
+  $pend = max(0, $tot-$cum);
+  $porc = $tot ? round($cum*100.0/$tot,1) : 0.0;
+  return ['tot'=>$tot,'cumplidos'=>$cum,'pend'=>$pend,'porc'=>$porc];
+}
+
+/* Sistema activo */
+$g_all    = kpi_global_all($pdo);
+$g_scope  = kpi_from_like($pdo, "storage/{$PREFIX}/%");
+$tot_controles = $g_scope['tot'];
+$tot_cumplidos = $g_scope['cumplidos'];
+$tot_pend      = $g_scope['pend'];
+$porc_scope    = $g_scope['porc'];
+
+/* ===== Cumplimiento por área (sólo aplica a Listas) ===== */
 function kpi_por_area(PDO $pdo, string $prefix): array {
-  $out = []; $areas = ['S1','S2','S3','S4'];
-  foreach ($areas as $ax) {
-    $like = "storage/{$prefix}/{$ax}/%";
-    $q1 = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE file_rel LIKE ?");
-    $q2 = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE estado='si' AND file_rel LIKE ?");
-    $q1->execute([$like]); $q2->execute([$like]);
-    $cnt = (int)($q1->fetchColumn() ?: 0);
-    $cum = (int)($q2->fetchColumn() ?: 0);
-    $out[$ax] = [
-      'controles'=>$cnt,
-      'cumplidos'=>$cum,
-      'pendientes'=>max(0,$cnt-$cum),
-      'porc'=>$cnt?round($cum*100.0/$cnt,1):0.0
+  // Siempre devuelve S1..S4 aunque haya 0 filas, para que no falten S2/S4
+  $base = ['S1'=>['controles'=>0,'cumplidos'=>0,'pendientes'=>0,'porc'=>0.0],
+           'S2'=>['controles'=>0,'cumplidos'=>0,'pendientes'=>0,'porc'=>0.0],
+           'S3'=>['controles'=>0,'cumplidos'=>0,'pendientes'=>0,'porc'=>0.0],
+           'S4'=>['controles'=>0,'cumplidos'=>0,'pendientes'=>0,'porc'=>0.0]];
+  $sql = "
+    SELECT
+      CASE
+        WHEN file_rel LIKE 'storage/{$prefix}/S1/%' THEN 'S1'
+        WHEN file_rel LIKE 'storage/{$prefix}/S2/%' THEN 'S2'
+        WHEN file_rel LIKE 'storage/{$prefix}/S3/%' THEN 'S3'
+        WHEN file_rel LIKE 'storage/{$prefix}/S4/%' THEN 'S4'
+      END AS area,
+      COUNT(*) total,
+      SUM(estado='si') si
+    FROM checklist
+    WHERE file_rel LIKE 'storage/{$prefix}/%'
+    GROUP BY area
+  ";
+  foreach ($pdo->query($sql) as $r){
+    $a = $r['area'];
+    if (!$a) continue;
+    $t = (int)$r['total']; $si=(int)$r['si'];
+    $base[$a] = [
+      'controles'=>$t,
+      'cumplidos'=>$si,
+      'pendientes'=>max(0,$t-$si),
+      'porc'=>$t?round($si*100.0/$t,1):0.0
     ];
   }
-  return $out;
+  return $base;
 }
 
-/* Variante “single” (sin S1..S4) para Última inspección y Visitas */
-function kpi_single(PDO $pdo, string $prefix, string $label): array {
-  $like = "storage/{$prefix}/%";
-  $q1 = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE file_rel LIKE ?");
-  $q2 = $pdo->prepare("SELECT COUNT(*) FROM checklist WHERE estado='si' AND file_rel LIKE ?");
-  $q1->execute([$like]); $q2->execute([$like]);
-  $cnt = (int)($q1->fetchColumn() ?: 0);
-  $cum = (int)($q2->fetchColumn() ?: 0);
-  return [
-    'rows' => [[
-      'label'      => $label,
-      'controles'  => $cnt,
-      'cumplidos'  => $cum,
-      'pendientes' => max(0,$cnt-$cum),
-      'porc'       => $cnt?round($cum*100.0/$cnt,1):0.0
-    ]]
-  ];
+/* ===== Chips de “Tareas críticas” por área/subcarpeta =====
+   - En Listas => S1..S4 con % y link a lista_de_control.php?area=SX
+   - En Última/Visitas => subcarpetas reales (token 3 del path) con % y link a su página (?sub=...)
+*/
+function chips_criticos(PDO $pdo, string $scope, array $SCOPES): array {
+  $prefix = $SCOPES[$scope]['prefix'];
+  if ($scope === 'lista_de_control') {
+    $stats = kpi_por_area($pdo, $prefix);
+    $out = [];
+    foreach(['S1','S2','S3','S4'] as $a){
+      $p = $stats[$a]['porc'];
+      $out[] = [
+        'label' => $a,
+        'pct'   => $p,
+        'count' => $stats[$a]['pendientes'],
+        'href'  => 'lista_de_control.php?area='.$a
+      ];
+    }
+    return $out;
+  }
+
+  // Última inspección o Visitas => token 3 del path
+  $rows = [];
+  $sql = "
+    SELECT
+      SUBSTRING_INDEX(SUBSTRING_INDEX(file_rel,'/',3), '/', -1) AS sub,
+      COUNT(*) total,
+      SUM(estado='si') si
+    FROM checklist
+    WHERE file_rel LIKE 'storage/{$prefix}/%'
+    GROUP BY sub
+    ORDER BY sub
+  ";
+  foreach($pdo->query($sql) as $r){
+    $tot = (int)$r['total']; $si=(int)$r['si'];
+    $pct = $tot ? round($si*100.0/$tot,1) : 0.0;
+    $sub = (string)$r['sub'];
+    $href = $SCOPES[$scope]['route'].'?sub='.rawurlencode($sub);
+    $rows[] = ['label'=>$sub, 'pct'=>$pct, 'count'=>max(0,$tot-$si), 'href'=>$href];
+  }
+  return $rows;
 }
 
-/* ===== Cálculos ===== */
-$g = kpi_global($pdo, $PREFIX);
-$tot_controles = $g['tot'];
-$tot_cumplidos = $g['cumplidos'];
-$tot_pend      = $g['pend'];
-$porc          = $g['porc'];
+$chips = chips_criticos($pdo, $scope, $SCOPES);
 
-/* Data rows para la tabla inferior (depende del scope) */
-$table_rows = [];
+/* ===== Datos para barras por área (si estás en Listas) ===== */
 $uses_areas = ($scope === 'lista_de_control');
-
+$table_rows = [];
 if ($uses_areas) {
-  $areas_stats = kpi_por_area($pdo, $PREFIX);
+  $areas_stats = kpi_por_area($pdo, 'listas_control');
   foreach (['S1','S2','S3','S4'] as $ax) {
     $st = $areas_stats[$ax];
     $table_rows[] = [
@@ -136,24 +193,19 @@ if ($uses_areas) {
     ];
   }
 } else {
-  // Única fila: “Observaciones” para Última inspección, y una genérica para Visitas
+  // Única barra para subcarpeta genérica del sistema activo
   $label = ($scope === 'ultima_inspeccion') ? 'Observaciones' : 'Visitas';
-  $single = kpi_single($pdo, $PREFIX, $label);
-  foreach ($single['rows'] as $r) {
-    $table_rows[] = [
-      'label'      => $r['label'],
-      'controles'  => $r['controles'],
-      'cumplidos'  => $r['cumplidos'],
-      'pendientes' => $r['pendientes'],
-      'porc'       => $r['porc'],
-      'href'       => $SCOPES[$scope]['route'] // sin ?area
-    ];
-  }
+  $like = "storage/{$PREFIX}/%";
+  $k = kpi_from_like($pdo, $like);
+  $table_rows[] = [
+    'label'      => $label,
+    'controles'  => $k['tot'],
+    'cumplidos'  => $k['cumplidos'],
+    'pendientes' => $k['pend'],
+    'porc'       => $k['porc'],
+    'href'       => $SCOPES[$scope]['route']
+  ];
 }
-
-/* ===== Grafana (embed opcional) ===== */
-$grafana_line = 'http://localhost:3000/d/adfnc82/porcentaje-de-tareas-realizadas?orgId=1&from=now-30d&to=now&viewPanel=panel-1';
-$grafana_pie  = 'http://localhost:3000/d/adfnc82/porcentaje-de-tareas-realizadas?orgId=1&from=now-30d&to=now&viewPanel=panel-3';
 
 ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
 ?>
@@ -180,16 +232,15 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
   .title{ font-weight:800; font-size:1.05rem; margin:0 0 .4rem 0 }
   .muted{ color:var(--mut) }
 
-  /* Tabs filtro — MÁS GRANDES */
   .tabs{ display:flex; gap:10px; flex-wrap:wrap; margin:12px 0 18px }
   .tab{
     border:1px solid rgba(255,255,255,.18);
     background:rgba(15,17,23,.65);
     color:#e9eef5;
-    padding:.6rem 1.2rem;              /* <-- más grande */
+    padding:.6rem 1.2rem;
     border-radius:999px;
     font-weight:900;
-    font-size:1rem;                     /* <-- más grande */
+    font-size:1rem;
     text-decoration:none;
     letter-spacing:.01em;
   }
@@ -203,21 +254,31 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
     box-shadow: inset 0 0 0 10px #0f141c, 0 0 0 1px #2b3140, 0 10px 30px rgba(0,0,0,.35);
   }
   .gauge>.v{ font-weight:900; font-size:2.6rem; letter-spacing:.02em }
-  .g-cap{ text-align:center; margin-top:.5rem; font-weight:700; color:#d6ffe1 }
+
+  .gauge-sm{ --p:0; width:180px; height:180px; border-radius:999px;
+    background: radial-gradient(closest-side,#0e1116 72%,transparent 0 99.9%,#0e1116 0),
+               conic-gradient(var(--ok) calc(var(--p)*1%), #3a3f4a 0);
+    display:grid; place-items:center; margin:auto;
+    box-shadow: inset 0 0 0 8px #0f141c, 0 0 0 1px #2b3140;
+  }
+  .gauge-sm .v{ font-weight:900; font-size:2.0rem }
+
+  .chip{ display:inline-flex; align-items:center; gap:.5rem; padding:.45rem .7rem;
+    border:1px solid rgba(255,255,255,.18); border-radius:999px; background:#0f1722; margin:.22rem;
+    text-decoration:none; color:#e9eef5; font-weight:800; }
+  .chip .pct{ opacity:.8; font-weight:800 }
+  .chip:hover{ background:#152033 }
 
   .bar{ display:flex; align-items:center; gap:.6rem; }
   .bar .label{ width:200px; color:#e6f4ea; font-weight:700 }
   .bar .track{ flex:1; height:12px; background:#1b222c; border-radius:999px; overflow:hidden; border:1px solid #2a3140 }
   .bar .fill{ height:100%; background:linear-gradient(90deg,#1cd259,#15a34a) }
   .bar .pct{ width:60px; text-align:right; color:#bfe8cb; font-weight:800 }
-  .sig{ width:10px; height:10px; border-radius:999px }
-  .sig.ok{ background:#16a34a } .sig.warn{ background:#f59e0b } .sig.bad{ background:#ef4444 }
 
   table.tbl{ width:100%; border-collapse:collapse }
   .tbl th,.tbl td{ padding:.6rem .7rem; border-bottom:1px solid rgba(255,255,255,.08) }
   .tbl th{ font-weight:800; color:#d7e7dc }
 
-  iframe{ background:#0b0e13; border-radius:12px; width:100%; height:380px; border:0 }
   .btn-acc{ background:#16a34a; color:#fff; border:none; border-radius:12px; font-weight:800; padding:.45rem .9rem }
   .btn-acc:hover{ background:#22c55e }
 </style>
@@ -229,7 +290,6 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
       <div class="brand-title">Batallón de Comunicaciones 602</div>
       <div class="brand-sub">“Hogar de las Comunicaciones Fijas del Ejército”</div>
     </div>
-    <div class="brand-year"><?= date('Y') ?></div>
   </div>
 </header>
 
@@ -246,16 +306,46 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
 <div class="container">
   <div class="grid">
 
-    <div class="panel link" data-href="<?= e($DOC_URL) ?>" style="grid-column: span 4;">
-      <h3 class="title">Cumplimiento Global — <?= e($ACTIVE['label']) ?></h3>
-      <div class="gauge" style="--p: <?= (float)$porc ?>;"><div class="v"><?= (int)$porc ?>%</div></div>
-      <div class="g-cap">Objetivo ≥ 90%</div>
+    <!-- 1) Cumplimiento Global — TODOS LOS SISTEMAS -->
+    <div class="panel" style="grid-column: span 4;">
+      <h3 class="title">Cumplimiento Global — Todos los sistemas</h3>
+      <div class="gauge" style="--p: <?= (float)$g_all['porc'] ?>;"><div class="v"><?= (int)$g_all['porc'] ?>%</div></div>
+      <div class="mt-3 text-center muted">
+        Controles: <b><?= $g_all['tot'] ?></b> · Cumplidos: <b><?= $g_all['cumplidos'] ?></b> · Pendientes: <b><?= $g_all['pend'] ?></b>
+      </div>
+    </div>
+
+    <!-- 2) Cumplimiento del SISTEMA ACTIVO (sólo 1 gauge) -->
+    <div class="panel link" data-href="<?= e($DOC_URL) ?>" style="grid-column: span 5;">
+      <h3 class="title">Cumplimiento — <?= e($ACTIVE['label']) ?> (activo)</h3>
+      <div class="gauge-sm" style="--p: <?= (float)$porc_scope ?>;"><div class="v"><?= (float)$porc_scope ?>%</div></div>
       <div class="mt-3 text-center muted">
         Controles: <b><?= $tot_controles ?></b> · Cumplidos: <b><?= $tot_cumplidos ?></b> · Pendientes: <b><?= $tot_pend ?></b>
       </div>
     </div>
 
-    <div class="panel link" data-href="<?= e($DOC_URL) ?>" style="grid-column: span 5;">
+    <!-- 3) “Tareas críticas”: chips por Área/Subcarpeta (link a ingresar/editar) -->
+    <div class="panel" style="grid-column: span 3;">
+      <h3 class="title">Tareas Críticas — <?= e($ACTIVE['label']) ?></h3>
+      <?php if (empty($chips)): ?>
+        <div class="muted">No hay datos para este sistema.</div>
+      <?php else: ?>
+        <div>
+          <?php foreach($chips as $c): ?>
+            <a class="chip" href="<?= e($c['href']) ?>" title="Pend: <?= (int)$c['count'] ?>">
+              <span><?= e($c['label'] ?: '—') ?></span>
+              <span class="pct">(<?= (float)$c['pct'] ?>%)</span>
+            </a>
+          <?php endforeach; ?>
+        </div>
+        <div class="mt-3">
+          <a class="btn-acc btn btn-sm" href="<?= e($DOC_URL) ?>">Ingresar / Editar</a>
+        </div>
+      <?php endif; ?>
+    </div>
+
+    <!-- Barras por área / única barra según scope -->
+    <div class="panel link" data-href="<?= e($DOC_URL) ?>" style="grid-column: span 7;">
       <h3 class="title">Cumplimiento por Área</h3>
       <?php if ($uses_areas): ?>
         <div class="d-flex flex-column gap-2">
@@ -263,26 +353,20 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
             $aliases=['S1'=>'Personal (S-1)','S2'=>'Inteligencia (S-2)','S3'=>'Operaciones (S-3)','S4'=>'Material (S-4)'];
             foreach($table_rows as $r):
               $pct = $r['porc'];
-              $sig = ($pct>=90?'ok':($pct>=75?'warn':'bad'));
+              $sig = ($pct>=90?'#16a34a':($pct>=75?'#f59e0b':'#ef4444'));
           ?>
           <div class="bar">
             <div class="label"><?= e($aliases[$r['label']] ?? $r['label']) ?></div>
-            <div class="sig <?= $sig ?>"></div>
             <div class="track"><div class="fill" style="width:<?= (float)$pct ?>%"></div></div>
-            <div class="pct"><?= $pct ?>%</div>
+            <div class="pct" style="color:<?= $sig ?>"><?= $pct ?>%</div>
           </div>
           <?php endforeach; ?>
         </div>
-        <div class="mt-3 muted" style="font-size:.9rem">
-          <span class="sig ok"></span> OK (≥90%) &nbsp; <span class="sig warn"></span> Atención (75–89%) &nbsp; <span class="sig bad"></span> Crítico (&lt;75%)
-        </div>
       <?php else: ?>
-        <!-- Cuando no hay S1..S4, mostramos una única barra (p.ej., “Observaciones”) -->
         <?php $r=$table_rows[0] ?? ['label'=>'Observaciones','porc'=>0]; $pct=$r['porc']; ?>
         <div class="d-flex flex-column gap-2">
           <div class="bar">
             <div class="label"><?= e($r['label']) ?></div>
-            <div class="sig <?= ($pct>=90?'ok':($pct>=75?'warn':'bad')) ?>"></div>
             <div class="track"><div class="fill" style="width:<?= (float)$pct ?>%"></div></div>
             <div class="pct"><?= $pct ?>%</div>
           </div>
@@ -290,29 +374,7 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
       <?php endif; ?>
     </div>
 
-    <div class="panel" style="grid-column: span 3;">
-      <h3 class="title">Temas Críticos</h3>
-      <div class="d-flex flex-column gap-2">
-        <div style="background:#2a1113; border-radius:8px; padding:.5rem .7rem;">⚠️ Falta de documentación en S-4</div>
-        <div style="background:#2a1a00; border-radius:8px; padding:.5rem .7rem;">📅 Vencimiento de licencias (S-1)</div>
-        <div style="background:#052e1b; border-radius:8px; padding:.5rem .7rem;">✅ Capacitación S-2 completada</div>
-      </div>
-      <div class="mt-3">
-        <a class="btn-acc btn btn-sm" href="<?= e($DOC_URL) ?>">Ver documentos</a>
-      </div>
-    </div>
-
-    <div class="panel" style="grid-column: span 7;">
-      <h3 class="title">Tendencia Histórica — <?= e($ACTIVE['label']) ?></h3>
-      <iframe src="<?= e($grafana_line) ?>"></iframe>
-    </div>
-
-    <div class="panel" style="grid-column: span 5;">
-      <h3 class="title">Distribución por Categoría</h3>
-      <iframe src="<?= e($grafana_pie) ?>"></iframe>
-    </div>
-
-    <!-- === TABLA DE ABAJO: fuente de progreso + Acciones (Editar) === -->
+    <!-- Tabla resumen inferior -->
     <div class="panel" style="grid-column: span 12;">
       <h3 class="title">Porcentaje de tareas realizadas — <?= e($ACTIVE['label']) ?></h3>
       <div class="table-responsive">
@@ -354,11 +416,11 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
               <td class="text-end"><?= $tot_pend ?></td>
               <td>
                 <div class="bar">
-                  <div class="track"><div class="fill" style="width:<?= (float)$porc ?>%"></div></div>
-                  <div class="pct"><?= $porc ?>%</div>
+                  <div class="track"><div class="fill" style="width:<?= (float)$porc_scope ?>%"></div></div>
+                  <div class="pct"><?= $porc_scope ?>%</div>
                 </div>
               </td>
-              <td class="text-end"><b><?= $porc ?>%</b></td>
+              <td class="text-end"><b><?= $porc_scope ?>%</b></td>
               <td class="text-center">
                 <a class="btn-acc btn btn-sm" href="<?= e($DOC_URL) ?>">Editar</a>
               </td>
