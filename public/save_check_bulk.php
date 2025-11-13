@@ -2,6 +2,9 @@
 // public/save_check_bulk.php
 declare(strict_types=1);
 
+require_once __DIR__ . '/../auth/bootstrap.php'; // para sesión y require_login
+require_login();
+
 require_once __DIR__ . '/../config/db.php';
 
 function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
@@ -10,6 +13,14 @@ function starts_with($h,$n){ return substr($h,0,strlen($n)) === $n; }
 ini_set('display_errors','1');
 ini_set('display_startup_errors','1');
 error_reporting(E_ALL);
+
+/* ===== Usuario que realiza la actualización ===== */
+/* Ajustá estos índices según cómo guardes el usuario en sesión */
+$updatedBy =
+    $_SESSION['user']['username']      // ej: usuario CPS
+    ?? $_SESSION['user']['display']    // ej: nombre mostrado
+    ?? $_SESSION['user']['name']       // ej: nombre completo
+    ?? 'usuario';
 
 /* ===== Verificar método ===== */
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -77,7 +88,6 @@ $formValArr     = isset($_POST['form_val'])    && is_array($_POST['form_val'])  
 $files = $_FILES['evidencia'] ?? null;
 
 /* ===== Asegurar tablas necesarias ===== */
-/* ===== Asegurar tablas necesarias ===== */
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   id INT AUTO_INCREMENT PRIMARY KEY,
   file_rel VARCHAR(512) NOT NULL,
@@ -90,15 +100,18 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   observacion TEXT NULL,
   evidencia_path VARCHAR(512) NULL,
   updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by VARCHAR(100) NULL,
   UNIQUE KEY uq_file_row (file_rel,row_idx)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-/* Migración suave: si la tabla ya existía sin 'caracter', la agregamos */
+/* Migración suave: si la tabla ya existía sin 'caracter' / 'updated_by', las agregamos */
 try {
   $pdo->exec("ALTER TABLE checklist ADD COLUMN caracter VARCHAR(100) NULL");
-} catch (Throwable $e) {
-  // si ya existe, ignoramos el error
-}
+} catch (Throwable $e) { /* ignore */ }
+
+try {
+  $pdo->exec("ALTER TABLE checklist ADD COLUMN updated_by VARCHAR(100) NULL");
+} catch (Throwable $e) { /* ignore */ }
 
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -110,20 +123,22 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
   UNIQUE KEY uq_file_row_field (file_rel,row_idx,field_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-/* Prepared statements para consultas/updates ===== */
+/* ===== Prepared statements ===== */
 $stSelChecklist = $pdo->prepare("SELECT evidencia_path FROM checklist WHERE file_rel=? AND row_idx=?");
+
 $stInsertChecklist = $pdo->prepare("
-  INSERT INTO checklist (file_rel,row_idx,caracter,estado,observacion,evidencia_path,updated_at)
-  VALUES (?,?,?,?,?,?,NOW())
+  INSERT INTO checklist (file_rel,row_idx,caracter,estado,observacion,evidencia_path,updated_at,updated_by)
+  VALUES (?,?,?,?,?,?,NOW(),?)
 ");
 
 $stUpdateChecklist = $pdo->prepare("
   UPDATE checklist
-     SET caracter = ?,
-         estado = ?,
-         observacion = ?,
-         evidencia_path = ?,
-         updated_at = NOW()
+     SET caracter      = ?,
+         estado        = ?,
+         observacion   = ?,
+         evidencia_path= ?,
+         updated_at    = NOW(),
+         updated_by    = ?
    WHERE file_rel = ? AND row_idx = ?
 ");
 
@@ -132,13 +147,11 @@ $stUpsertForm = $pdo->prepare("
   VALUES (?,?,?,?,NOW())
   ON DUPLICATE KEY UPDATE
     field_value = VALUES(field_value),
-    updated_at = NOW()
+    updated_at  = NOW()
 ");
-
 
 /* ===== Determinar todos los row_idx a procesar ===== */
 $rowIds = [];
-// desde estado / observacion / criticidad / formulario
 foreach ([$estadoArr, $obsArr, $criticidadArr, $formKeyArr, $formValArr] as $arr) {
   foreach ($arr as $k => $_) {
     $k = (int)$k;
@@ -163,38 +176,12 @@ if (!is_dir($evidBase)) {
   @mkdir($evidBase, 0775, true);
 }
 
-/* Prepared statements para consultas/updates ===== */
-$stSelChecklist = $pdo->prepare("SELECT evidencia_path FROM checklist WHERE file_rel=? AND row_idx=?");
-$stInsertChecklist = $pdo->prepare("
-  INSERT INTO checklist (file_rel,row_idx,caracter,estado,observacion,evidencia_path,updated_at)
-  VALUES (?,?,?,?,?,?,NOW())
-");
-
-$stUpdateChecklist = $pdo->prepare("
-  UPDATE checklist
-     SET caracter = ?,
-         estado = ?,
-         observacion = ?,
-         evidencia_path = ?,
-         updated_at = NOW()
-   WHERE file_rel = ? AND row_idx = ?
-");
-
-
-$stUpsertForm = $pdo->prepare("
-  INSERT INTO checklist_form (file_rel,row_idx,field_key,field_value,updated_at)
-  VALUES (?,?,?,?,NOW())
-  ON DUPLICATE KEY UPDATE
-    field_value = VALUES(field_value),
-    updated_at = NOW()
-");
-
 /* ===== Procesar cada fila ===== */
 foreach ($rowIds as $idx) {
   $rowIdx = (int)$idx;
   if ($rowIdx <= 0) continue;
 
-    // Criticidad
+  // Criticidad
   $criticidad = $criticidadArr[$rowIdx] ?? '';
   $criticidad = trim((string)$criticidad);
   if ($criticidad === '') {
@@ -220,13 +207,13 @@ foreach ($rowIds as $idx) {
 
   if ($files && isset($files['error'][$rowIdx]) && $files['error'][$rowIdx] !== UPLOAD_ERR_NO_FILE) {
     if ($files['error'][$rowIdx] === UPLOAD_ERR_OK) {
-      $tmpName = $files['tmp_name'][$rowIdx];
+      $tmpName  = $files['tmp_name'][$rowIdx];
       $origName = $files['name'][$rowIdx];
-      $ext = pathinfo($origName, PATHINFO_EXTENSION);
+      $ext      = pathinfo($origName, PATHINFO_EXTENSION);
       $safeName = preg_replace('/[^A-Za-z0-9_\-\.]/','_', pathinfo($origName, PATHINFO_FILENAME));
       if ($safeName === '') $safeName = 'evidencia';
       $finalName = $safeName . '_' . date('Ymd_His') . '_' . $rowIdx . ($ext ? '.'.$ext : '');
-      $destAbs  = $evidBase . '/' . $finalName;
+      $destAbs   = $evidBase . '/' . $finalName;
 
       if (is_uploaded_file($tmpName) && @move_uploaded_file($tmpName, $destAbs)) {
         // ruta relativa desde el proyecto
@@ -243,12 +230,27 @@ foreach ($rowIds as $idx) {
   // Insertar o actualizar checklist
   if ($rowDb) {
     // Ya existe fila → UPDATE
-    $stUpdateChecklist->execute([$criticidad, $estado, $obs, $evToSave, $file_rel, $rowIdx]);
+    $stUpdateChecklist->execute([
+      $criticidad,
+      $estado,
+      $obs,
+      $evToSave,
+      $updatedBy,
+      $file_rel,
+      $rowIdx
+    ]);
   } else {
     // No existe → INSERT
-    $stInsertChecklist->execute([$file_rel, $rowIdx, $criticidad, $estado, $obs, $evToSave]);
+    $stInsertChecklist->execute([
+      $file_rel,
+      $rowIdx,
+      $criticidad,
+      $estado,
+      $obs,
+      $evToSave,
+      $updatedBy
+    ]);
   }
-
 
   // Campos formulario (si vienen)
   if (isset($formKeyArr[$rowIdx])) {

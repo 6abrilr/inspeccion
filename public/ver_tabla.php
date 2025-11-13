@@ -246,10 +246,12 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   observacion TEXT NULL,
   evidencia_path VARCHAR(512) NULL,
   updated_at TIMESTAMP NULL,
+  updated_by VARCHAR(100) NULL,         -- NUEVO: usuario que modificó
   UNIQUE KEY uq_file_row (file_rel,row_idx)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
 try { $pdo->exec("ALTER TABLE checklist ADD COLUMN caracter VARCHAR(100) NULL"); } catch (Throwable $e) { /* ignore */ }
+try { $pdo->exec("ALTER TABLE checklist ADD COLUMN updated_by VARCHAR(100) NULL"); } catch (Throwable $e) { /* ignore */ }
 
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -276,9 +278,21 @@ $pdf_exists = is_file($pdf_abs);
 $area = strtoupper($SCOPE['label']);
 if ($inScope==='listas_control' && preg_match('#/storage/listas_control/(S1|S2|S3|S4)/#', $rel, $m)) { $area = $m[1]; }
 
-/* Última actualización */
-$stUpd = $pdo->prepare("SELECT MAX(updated_at) FROM checklist WHERE file_rel=?");
-$stUpd->execute([$rel]); $lastUpd = $stUpd->fetchColumn();
+/* Última actualización (fecha + usuario) */
+$stUpd = $pdo->prepare("
+  SELECT updated_at, updated_by
+  FROM checklist
+  WHERE file_rel = ?
+    AND updated_at IS NOT NULL
+  ORDER BY updated_at DESC
+  LIMIT 1
+");
+$stUpd->execute([$rel]);
+$lastRow = $stUpd->fetch(PDO::FETCH_ASSOC) ?: null;
+
+$lastUpd = $lastRow['updated_at'] ?? null;
+$lastBy  = $lastRow['updated_by'] ?? null;
+
 
 /* ===== Construcción de listado visible + paginación ===== */
 $visible = [];
@@ -467,8 +481,15 @@ input[type="file"]{
       <span class="badge-area">Origen: <b><?= e($SCOPE['label']) ?></b></span>
       <span class="badge-area text-truncate" title="<?= e($rel) ?>">Archivo: <b><?= e(basename($rel)) ?></b></span>
       <?php if ($lastUpd): ?>
-        <span class="badge-area">Última actualización: <b><?= e(date('d/m/Y H:i', strtotime($lastUpd))) ?></b></span>
+        <span class="badge-area">
+          Última actualización:
+          <b><?= e(date('d/m/Y H:i', strtotime($lastUpd))) ?></b>
+          <?php if ($lastBy): ?>
+            — por <b><?= e($lastBy) ?></b>
+          <?php endif; ?>
+        </span>
       <?php endif; ?>
+
 
       <?php if (!empty($sheetNames) && count($sheetNames)>1): ?>
         <form method="get" class="form-compact">
