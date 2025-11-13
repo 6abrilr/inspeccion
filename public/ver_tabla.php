@@ -1,7 +1,9 @@
 <?php
-/* public/ver_tabla.php — Tema 602 con paginación + toolbar compacta
-   + Formato “Formulario” (Dato) y tooltip de “Acción Correctiva” SOLO para VISITAS.
-*/
+/* public/ver_tabla.php — Tema 602 con paginación, Criticidad y auto-guardado */
+declare(strict_types=1);
+
+require_once __DIR__ . '/../auth/bootstrap.php';
+require_login();
 require_once __DIR__ . '/../config/db.php';
 
 function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
@@ -50,8 +52,8 @@ $scopeMeta = [
 $SCOPE = $scopeMeta[$inScope];
 $isVisitas = ($inScope === 'visitas_de_estado_mayor');
 
-/* Mostrar “Carácter” solo en última inspección */
-$showCaracter = ($inScope === 'ultima_inspeccion');
+/* Ya no usamos “Carácter” del Excel como columna fija */
+$showCaracter = false;
 
 /* ===== Preferencias por archivo (modo nro + formato de tabla) ===== */
 $pdo->exec("CREATE TABLE IF NOT EXISTS xlsx_prefs (
@@ -161,7 +163,7 @@ if(!isset($errFatal) && $ext==='xlsx'){
   }
   function read_xlsx_all($file,$sheetIdx=0,&$sheetNames=[],&$err=null){
     try{
-      $reader=new \PhpOffice\PhpSpreadsheet\Reader\Xlsx(); $reader->setReadDataOnly(false);
+      $reader=new \PhpOffice\PhpSpreadsheet\Reader\Xlsx(); $reader->load($file);
       $ss=$reader->load($file);
       $sheetNames=[]; $count=$ss->getSheetCount(); for($i=0;$i<$count;$i++){ $sheetNames[]=$ss->getSheet($i)->getTitle(); }
       if($sheetIdx>=$count) $sheetIdx=0;
@@ -191,45 +193,30 @@ else{
   else{ [$rows,$rowFill,$sheetNames,$err]=read_xlsx_all($abs,$sheetIdx,$sheetNames,$err); }
 }
 
-/* Copia cruda para leer columna 3 como “Acción Correctiva” en VISITAS */
+/* Copia cruda para tooltip de “Acción Correctiva” (solo VISITAS) */
 $rawRows = $rows;
-
 /* ===== Detección de encabezado real ===== */
-function looks_like_header(array $first, bool $showCaracter): bool {
-  // Normalizamos primeras celdas para comparar
+function looks_like_header(array $first): bool {
   $a = isset($first[0]) ? norm((string)$first[0]) : '';
   $b = isset($first[1]) ? norm((string)$first[1]) : '';
-  $c = isset($first[2]) ? norm((string)$first[2]) : '';
-
   $isNro = in_array($a, ['NRO','Nº','NRO.','NUM','NUMERO','NRO/OBS','OBSNRO','OBSERVACIONNRO'], true);
   $isObs = ($b === 'OBSERVACIONES' || $b === 'OBSERVACION');
-  if($showCaracter){
-    $isCar = ($c === 'CARACTER' || $c === 'CARÁCTER');
-    return ($isNro && $isObs && $isCar);
-  }
   return ($isNro && $isObs);
 }
 
-/* ===== Encabezados + recorte a 2/3 columnas ===== */
+/* ===== Encabezados + recorte a 2 columnas de texto ===== */
 $headers=[];
 if($rows){
   $first=$rows[0];
-
-  if(looks_like_header($first, $showCaracter)){
-    // Usamos el header del archivo, pero normalizado
+  if(looks_like_header($first)){
     $headers = ['Nro','Observaciones'];
-    if($showCaracter) $headers[]='Carácter';
     array_shift($rows); if($rowFill) array_shift($rowFill);
     array_shift($rawRows);
   } else {
-    // Forzamos encabezados propios para evitar que aparezca "1" o similar
     $headers = ['Nro','Observaciones'];
-    if($showCaracter) $headers[]='Carácter';
   }
 }
-
-/* Para VISITAS mostramos 2 columnas visibles, pero conservamos la 3.ª como “acción” */
-$MAX_TEXT_COLS = $showCaracter ? 3 : 2;
+$MAX_TEXT_COLS = 2;
 $headers = array_slice(array_pad(array_values($headers), $MAX_TEXT_COLS, ''), 0, $MAX_TEXT_COLS);
 foreach ($rows as $i => $r) {
   $rows[$i] = array_slice(array_pad(array_values($r), $MAX_TEXT_COLS, ''), 0, $MAX_TEXT_COLS);
@@ -251,12 +238,18 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   id INT AUTO_INCREMENT PRIMARY KEY,
   file_rel VARCHAR(512) NOT NULL,
   row_idx INT NOT NULL,
+  nro VARCHAR(100) NULL,
+  descripcion TEXT NULL,
+  caracter VARCHAR(100) NULL,           -- reutilizada para Criticidad
+  accion_correctiva TEXT NULL,
   estado ENUM('si','no') NULL,
   observacion TEXT NULL,
   evidencia_path VARCHAR(512) NULL,
   updated_at TIMESTAMP NULL,
   UNIQUE KEY uq_file_row (file_rel,row_idx)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+try { $pdo->exec("ALTER TABLE checklist ADD COLUMN caracter VARCHAR(100) NULL"); } catch (Throwable $e) { /* ignore */ }
 
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -268,12 +261,11 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
   UNIQUE KEY uq_file_row_field (file_rel,row_idx,field_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
-$sel = $pdo->prepare("SELECT row_idx, estado, observacion, evidencia_path FROM checklist WHERE file_rel=?");
-$sel->execute([$rel]); $prefill=[]; foreach($sel as $r){ $prefill[(int)$r['row_idx']]=$r; }
-
-$selF = $pdo->prepare("SELECT row_idx, field_key, field_value FROM checklist_form WHERE file_rel=?");
-$selF->execute([$rel]); $prefForm=[];
-foreach($selF as $r){ $i=(int)$r['row_idx']; $prefForm[$i][$r['field_key']] = $r['field_value']; }
+/* Prefill desde DB */
+$sel = $pdo->prepare("SELECT row_idx, caracter, estado, observacion, evidencia_path FROM checklist WHERE file_rel=?");
+$sel->execute([$rel]);
+$prefill = [];
+foreach($sel as $r){ $prefill[(int)$r['row_idx']] = $r; }
 
 /* PDF vecino */
 $pdf_abs = preg_replace('/\.(xlsx|csv)$/i', '.pdf', $abs);
@@ -288,33 +280,6 @@ if ($inScope==='listas_control' && preg_match('#/storage/listas_control/(S1|S2|S
 $stUpd = $pdo->prepare("SELECT MAX(updated_at) FROM checklist WHERE file_rel=?");
 $stUpd->execute([$rel]); $lastUpd = $stUpd->fetchColumn();
 
-/* Severidad por “Carácter” */
-function row_severity_class($caracter){
-  $n = norm($caracter);
-  if($n==='INMEDIATA') return 'sev-immediate';
-  if($n==='PROGRAMADA' || $n==='PROGRAMA' || $n==='PROGRAMAS') return 'sev-program';
-  return '';
-}
-
-/* ===== Detección de filas “formulario” ===== */
-$formLabelsMap = [
-  'PREDIOENLITIGIO'             => 'predio_litigio',
-  'ESTADOACTUAL'                 => 'estado_actual',
-  'PREDIO'                       => 'predio',
-  'DIMENSIONES'                  => 'dimensiones',
-  'TIEMPOESTIPULADO'            => 'tiempo',
-  'ORGANISMOQUELOSUSCRIBIO'     => 'organismo',
-  'ORGANISMOQUELOSUSCRIBIÓ'     => 'organismo',
-];
-function detect_form_key(array $row, array $map){
-  for($i=0;$i<min(3,count($row));$i++){
-    $n = norm((string)$row[$i]);
-    if($n==='') continue;
-    if(isset($map[$n])) return $map[$n];
-  }
-  return null;
-}
-
 /* ===== Construcción de listado visible + paginación ===== */
 $visible = [];
 $rowIndex=1; $lastSection=null;
@@ -323,38 +288,30 @@ foreach($rows as $i=>$r){
 
   if(is_title_row($r,$mode)){
     $lastSection=['section'=>true,'title'=>trim(($r[0]??'').' '.($r[1]??''))];
-    // NO incrementar $rowIndex aquí
     continue;
   }
-
-  $sevClass = $showCaracter ? row_severity_class($r[2] ?? '') : '';
   if($lastSection){ $visible[]=$lastSection; $lastSection=null; }
 
-  $fk = ($tableFmt==='form') ? detect_form_key($r, $formLabelsMap) : null;
-  $formVal = ($fk && isset($prefForm[$rowIndex][$fk])) ? (string)$prefForm[$rowIndex][$fk] : '';
-
-  /* Acción correctiva SOLO para VISITAS: columna 3 del Excel (índice 2) del raw */
+  /* Tooltip de Acción Correctiva SOLO para VISITAS: 3ra col del Excel original */
   $accion = '';
   if ($isVisitas) {
     $raw = $rawRows[$i] ?? [];
-    $accion = trim((string)($raw[2] ?? '')); // 3ra columna como texto de tooltip
+    $accion = trim((string)($raw[2] ?? ''));
   }
 
-  $saved = $prefill[$rowIndex] ?? ['estado'=>'','observacion'=>'','evidencia_path'=>''];
+  $saved = $prefill[$rowIndex] ?? ['caracter'=>'','estado'=>'','observacion'=>'','evidencia_path'=>''];
 
   $visible[] = [
     'section'=>false,
     'row_idx'=>$rowIndex,
     'cols'=>$r,
-    'sevClass'=>$sevClass,
+    'criticidad'=>$saved['caracter'] ?? '',
     'estado'=>$saved['estado'] ?? '',
     'observacion'=>$saved['observacion'] ?? '',
     'ev'=>$saved['evidencia_path'] ?? '',
-    'form_key'=>$fk,
-    'form_val'=>$formVal,
     'accion'=>$accion,
   ];
-  $rowIndex++; // solo en filas de datos
+  $rowIndex++;
 }
 
 /* Estadísticas (solo datos) */
@@ -387,7 +344,6 @@ function base_qs($rel,$sheetIdx,$debugShowColor,$perPage,$fmt){
   return 'p='.rawurlencode($rel).'&s='.(int)$sheetIdx.($debugShowColor?'&showcolor=1':'').'&pp='.(int)$perPage.'&fmt='.rawurlencode($fmt);
 }
 $baseQS = base_qs($rel,$sheetIdx,$debugShowColor,$perPage,$tableFmt);
-
 ?>
 <!doctype html>
 <html lang="es">
@@ -396,10 +352,8 @@ $baseQS = base_qs($rel,$sheetIdx,$debugShowColor,$perPage,$tableFmt);
 <title><?= e(basename($abs)) ?> — <?= e($area) ?></title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-<link rel="stylesheet" href="assets/css/theme-602.css">
+<link rel="stylesheet" href="../assets/css/theme-602.css">
 <style>
-:root{ --sevRedRGB:239,68,68; --sevYellowRGB:245,158,11; --sevAlpha:0.35; }
-
 body{
   background: url("<?= e($IMG_BG) ?>") no-repeat center center fixed;
   background-size: cover;
@@ -407,25 +361,15 @@ body{
   background-color:#0f1117; color:#e9eef5; margin:0; padding:0;
   font-family:system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;
 }
-
 .page{ padding:16px 16px 24px }
 .box{ background:rgba(20,24,33,.75); border:1px solid rgba(255,255,255,.14); border-radius:16px; padding:12px; backdrop-filter:blur(6px) }
-
 .toolbar { gap: .6rem; flex-wrap: wrap; }
 .toolbar .left, .toolbar .right { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.badge-area { background: #0e1525; border: 1px solid rgba(255,255,255,.15); color: #d9e2ef; padding: .22rem .55rem; border-radius: 999px; font-weight: 800; font-size: .78rem; }
 
-.badge-area {
-  background: #0e1525; border: 1px solid rgba(255,255,255,.15);
-  color: #d9e2ef; padding: .22rem .55rem; border-radius: 999px; font-weight: 800; font-size: .78rem;
-}
-
-.btnx {
-  --padY: .42rem; --padX: .7rem; --radius: 10px; --border: rgba(255,255,255,.18);
-  display: inline-flex; align-items: center; gap: .45rem;
-  padding: var(--padY) var(--padX); border-radius: var(--radius);
-  font-weight: 800; font-size: .86rem; line-height: 1;
-  border: 1px solid var(--border); background: #0f1520; color: #e7ecf4; text-decoration: none;
-}
+.btnx { --padY: .42rem; --padX: .7rem; --radius: 10px; --border: rgba(255,255,255,.18);
+  display: inline-flex; align-items: center; gap: .45rem; padding: var(--padY) var(--padX); border-radius: var(--radius);
+  font-weight: 800; font-size: .86rem; line-height: 1; border: 1px solid var(--border); background: #0f1520; color: #e7ecf4; text-decoration: none; }
 .btnx:hover { background: #141c2b; color: #f3f7fb; border-color: rgba(255,255,255,.28); }
 .btnx--accent { background: #16a34a; color: #04110a; border-color: #13853e; }
 .btnx--accent:hover { background: #22c55e; border-color: #1ea152; color: #031007; }
@@ -435,7 +379,6 @@ body{
 .dropdown-item { font-weight: 700; font-size: .88rem; }
 .dropdown-header { color:#9fb3c8; font-weight:800; }
 
-/* ====== Tabla ====== */
 table{ width:100%; border-collapse:separate; border-spacing:0; }
 thead th{
   position:sticky; top:0; z-index:3;
@@ -449,9 +392,10 @@ tbody tr:hover{ background:rgba(255,255,255,.05) }
 .section{ background:linear-gradient(90deg, rgba(34,197,94,.18), rgba(34,197,94,.10)); color:#eaf7ee; font-weight:800; }
 
 @media (min-width: 1100px){
-  thead th:nth-last-child(3), tbody td:nth-last-child(3){ width:160px }
-  thead th:nth-last-child(2), tbody td:nth-last-child(2){ width:360px }
-  thead th:nth-last-child(1), tbody td:nth-last-child(1){ width:340px }
+  thead th:nth-last-child(4), tbody td:nth-last-child(4){ width:140px }   /* Criticidad */
+  thead th:nth-last-child(3), tbody td:nth-last-child(3){ width:160px }   /* Estado */
+  thead th:nth-last-child(2), tbody td:nth-last-child(2){ width:360px }   /* Observación */
+  thead th:nth-last-child(1), tbody td:nth-last-child(1){ width:340px }   /* Evidencia */
 }
 
 select, input[type="text"]{
@@ -466,29 +410,35 @@ input[type="file"]{
 .spinner{ width:72px; height:72px; border-radius:50%; border:6px solid rgba(255,255,255,.2); border-top-color:#22c55e; animation: spin 1s linear infinite; }
 @keyframes spin { to{ transform: rotate(360deg); } }
 
-.sev-immediate td{ background: rgba(var(--sevRedRGB), var(--sevAlpha)) !important; border-left: 4px solid rgb(var(--sevRedRGB)); }
-.sev-program  td{ background: rgba(var(--sevYellowRGB), var(--sevAlpha)) !important; border-left: 4px solid rgb(var(--sevYellowRGB)); }
-
 .brand-hero .brand-title{ color:#f3f7fb } .brand-hero .brand-sub{ color:#b9c6d8 }
 
-/* ===== Tooltip Acción Correctiva (solo VISITAS) ===== */
+/* Tooltip Acción Correctiva (solo VISITAS) */
 .tip-wrap{ display:inline-flex; align-items:center; gap:.35rem }
-.tip-dot{
-  display:inline-flex; width:18px; height:18px; border-radius:999px;
-  align-items:center; justify-content:center; font-size:.78rem; font-weight:900;
-  color:#9CF3AC; background:#1b2a1e; border:1px solid #2a804c; cursor:help;
-  user-select:none; outline:0;
-}
-.tip-box{
-  position:absolute; left: 1.2rem; top:50%; transform: translateY(-50%);
-  background:#0b1220; color:#eaf2ff; border:1px solid rgba(255,255,255,.15);
-  padding:.48rem .62rem; border-radius:10px; max-width:440px; min-width:240px;
-  box-shadow:0 10px 24px rgba(0,0,0,.45); font-size:.92rem; line-height:1.25;
-  visibility:hidden; opacity:0; transition:opacity .12s ease;
-  z-index: 10;
-}
+.tip-dot{ display:inline-flex; width:18px; height:18px; border-radius:999px; align-items:center; justify-content:center; font-size:.78rem; font-weight:900; color:#9CF3AC; background:#1b2a1e; border:1px solid #2a804c; cursor:help; user-select:none; outline:0; }
+.tip-box{ position:absolute; left: 1.2rem; top:50%; transform: translateY(-50%); background:#0b1220; color:#eaf2ff; border:1px solid rgba(255,255,255,.15);
+  padding:.48rem .62rem; border-radius:10px; max-width:440px; min-width:240px; box-shadow:0 10px 24px rgba(0,0,0,.45); font-size:.92rem; line-height:1.25; visibility:hidden; opacity:0; transition:opacity .12s ease; z-index: 10; }
 .tip{ position:relative; display:inline-flex; }
 .tip:hover .tip-box, .tip:focus-within .tip-box{ visibility:visible; opacity:1; }
+
+/* Criticidad (celda bien visible) */
+.td-criticidad{
+  position: relative;
+  transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease, color .15s ease;
+  border-left: 4px solid transparent;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+}
+.td-criticidad select{
+  background: #0f1520 !important;
+  color: #e5e7eb !important;
+  border: 1px solid rgba(255,255,255,.28);
+  border-radius: 8px;
+  font-weight: 700;
+}
+.td-criticidad select option{ background: #0f1520; color: #e5e7eb; font-weight: 600; }
+
+.td-criticidad.crit-baja{  background: linear-gradient(90deg, rgba(22,163,74,.92), rgba(22,163,74,.65));  border-left-color:#22c55e; color:#eafff3;  box-shadow: 0 0 0 1px rgba(22,163,74,.7); }
+.td-criticidad.crit-media{ background: linear-gradient(90deg, rgba(245,158,11,.95), rgba(245,158,11,.72)); border-left-color:#f59e0b; color:#1f1300; box-shadow: 0 0 0 1px rgba(245,158,11,.7); }
+.td-criticidad.crit-alta{  background: linear-gradient(90deg, rgba(239,68,68,.96), rgba(239,68,68,.78));  border-left-color:#ef4444; color:#fff5f5;  box-shadow: 0 0 0 1px rgba(239,68,68,.8); }
 </style>
 </head>
 <body>
@@ -497,13 +447,14 @@ input[type="file"]{
 
 <header class="brand-hero">
   <div class="hero-inner container-fluid">
-    <img class="brand-logo" src="assets/img/escudo602sinfondo.png" alt="Escudo 602">
+<img class="brand-logo brand-logo-small" src="../assets/img/bcom602.png" alt="Escudo 602">
     <div>
       <div class="brand-title">Batallón de Comunicaciones 602</div>
       <div class="brand-sub">“Hogar de las Comunicaciones Fijas del Ejército”</div>
     </div>
   </div>
 </header>
+
 
 <div class="page container-fluid">
 
@@ -545,9 +496,9 @@ input[type="file"]{
           <li><a class="dropdown-item" href="ver_tabla.php?<?= $baseQS ?>&setmode=title&page=<?= (int)$page ?>">Nro como TÍTULO</a></li>
           <li><a class="dropdown-item" href="ver_tabla.php?<?= $baseQS ?>&setmode=item&page=<?= (int)$page ?>">Nro como ÍTEM</a></li>
           <li><hr class="dropdown-divider"></li>
-          <li class="dropdown-header">Filas coloreadas</li>
+          <li class="dropdown-header">Filas coloreadas (debug)</li>
           <?php if(!$debugShowColor): ?>
-            <li><a class="dropdown-item" href="ver_tabla.php?<?= $baseQS ?>&page=<?= (int)$page ?>&showcolor=1">Ver color (debug)</a></li>
+            <li><a class="dropdown-item" href="ver_tabla.php?<?= $baseQS ?>&page=<?= (int)$page ?>&showcolor=1">Ver color</a></li>
           <?php else: ?>
             <li><a class="dropdown-item" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,false,$perPage,$tableFmt) ?>&page=<?= (int)$page ?>">Ocultar color</a></li>
           <?php endif; ?>
@@ -595,7 +546,7 @@ input[type="file"]{
           $from=max(1,$page-$win); $to=min($totalPages,$page+$win);
           if($from>1){ echo '<li class="page-item"><a class="page-link" href="ver_tabla.php?'.$baseQS.'&page=1">1</a></li>'; if($from>2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>'; }
           for($p=$from;$p<=$to;$p++){
-            $act = $p===$page?' active':'';
+            $act = $p===$page?' active':''; 
             echo '<li class="page-item'.$act.'"><a class="page-link" href="ver_tabla.php?'.$baseQS.'&page='.$p.'">'.$p.'</a></li>';
           }
           if($to<$totalPages){ if($to<$totalPages-1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>'; echo '<li class="page-item"><a class="page-link" href="ver_tabla.php?'.$baseQS.'&page='.$totalPages.'">'.$totalPages.'</a></li>'; }
@@ -623,7 +574,7 @@ input[type="file"]{
         <thead>
           <tr>
             <?php foreach($headers as $h): ?><th><?= e($h) ?></th><?php endforeach; ?>
-            <?php if($tableFmt==='form'): ?><th>Dato</th><?php endif; ?>
+            <th>Criticidad</th>
             <th>Estado</th>
             <th>Observación</th>
             <th>Evidencia</th>
@@ -632,26 +583,28 @@ input[type="file"]{
         <tbody>
         <?php
           if(empty($render)){
-            $extraCols = ($tableFmt==='form') ? 4 : 3;
+            $extraCols = 4; // Criticidad, Estado, Observación, Evidencia
             echo '<tr><td colspan="'.(count($headers)+$extraCols).'" class="text-muted">No hay filas para esta página.</td></tr>';
           } else {
             foreach($render as $v){
               if(!empty($v['section'])){
                 $title = trim($v['title'] ?? ''); if($title==='') $title='—';
-                $extraCols = ($tableFmt==='form') ? 4 : 3;
+                $extraCols = 4;
                 echo '<tr class="section"><td colspan="'.count($headers).'">'.e($title).'</td><td colspan="'.$extraCols.'"></td></tr>';
                 continue;
               }
 
               $r = $v['cols'];
               $rowIdx=(int)$v['row_idx'];
-              $est=$v['estado']; $obs=$v['observacion']; $ev=$v['ev'];
-              $sevClass=$v['sevClass'];
-              $fk = $v['form_key'] ?? null;
-              $fv = $v['form_val'] ?? '';
+              $crit=$v['criticidad'];
+              $est=$v['estado'];
+              $obs=$v['observacion'];
+              $ev=$v['ev'];
               $accion = $v['accion'] ?? '';
 
-              echo '<tr'.($sevClass ? ' class="'.$sevClass.'"' : '').'>';
+              $critClass = ($crit==='baja' ? 'crit-baja' : ($crit==='media' ? 'crit-media' : ($crit==='alta' ? 'crit-alta' : '')));
+
+              echo '<tr>';
 
               // Columna 1 (Nro)
               echo '<td>'.e($r[0] ?? '').'</td>';
@@ -667,22 +620,16 @@ input[type="file"]{
               }
               echo '</td>';
 
-              // “Carácter” visible (solo última inspección)
-              if ($showCaracter) {
-                echo '<td>'.e($r[2] ?? '').'</td>';
+              // Criticidad
+              echo '<td class="td-criticidad '.e($critClass).'">';
+              echo '<select name="criticidad['.$rowIdx.']" class="form-select form-select-sm criticidad-select" data-row="'.$rowIdx.'">';
+              $opts = [''=>'—','baja'=>'Baja','media'=>'Media','alta'=>'Alta'];
+              foreach($opts as $val=>$lab){
+                $selOpt = ($crit === $val) ? ' selected' : '';
+                echo '<option value="'.e($val).'"'.$selOpt.'>'.e($lab).'</option>';
               }
-
-              // Columna “Dato” (solo en formato Formulario)
-              if($tableFmt==='form'){
-                echo '<td>';
-                if($fk){
-                  echo '<input type="hidden" name="form_key['.$rowIdx.']" value="'.e($fk).'">';
-                  echo '<input class="form-control form-control-sm" type="text" name="form_val['.$rowIdx.']" value="'.e($fv).'" placeholder="Completar…">';
-                }else{
-                  echo '<span class="text-muted">—</span>';
-                }
-                echo '</td>';
-              }
+              echo '</select>';
+              echo '</td>';
 
               // Estado
               echo '<td><select name="estado['.$rowIdx.']" class="form-select form-select-sm">';
@@ -716,20 +663,72 @@ input[type="file"]{
   </form>
 
 </div>
-
 <script>
-  (function(){
-    const form = document.getElementById('bulkForm');
-    const overlay = document.getElementById('overlay');
-    if(!form || !overlay) return;
+(function(){
+  const form = document.getElementById('bulkForm');
+  const overlay = document.getElementById('overlay');
+
+  function showOverlay(){
+    if(!overlay) return;
+    overlay.classList.add('show');
+    overlay.setAttribute('aria-hidden','false');
+    document.body.setAttribute('aria-busy','true');
+  }
+  function hideOverlay(){
+    if(!overlay) return;
+    overlay.classList.remove('show');
+    overlay.setAttribute('aria-hidden','true');
+    document.body.removeAttribute('aria-busy');
+  }
+
+  if(form){
+    // Guardado manual (botón 💾)
     form.addEventListener('submit', function(){
-      overlay.classList.add('show');
-      overlay.setAttribute('aria-hidden','false');
-      document.body.setAttribute('aria-busy','true');
+      showOverlay();
       const toDisable = document.querySelectorAll('button, a.btnx');
-      toDisable.forEach(el => { if ('disabled' in el) el.disabled = true; });
+      toDisable.forEach(el => { if('disabled' in el) el.disabled = true; });
     });
-  })();
+
+    // Guardado automático al cambiar de página
+    document.querySelectorAll('.pagination a.page-link').forEach(function(a){
+      a.addEventListener('click', function(ev){
+        const href = a.getAttribute('href');
+        if(!href) return;
+        ev.preventDefault();
+
+        showOverlay();
+
+        const fd = new FormData(form);
+        fetch('save_check_bulk.php', {
+          method: 'POST',
+          body: fd,
+          credentials: 'same-origin'
+        }).then(function(){
+          window.location.href = href;
+        }).catch(function(){
+          hideOverlay();
+          if(confirm('Ocurrió un error al guardar automáticamente. ¿Deseás cambiar de página igualmente?')){
+            window.location.href = href;
+          }
+        });
+      });
+    });
+  }
+
+  // Aplicar clase de color a la celda de Criticidad
+  function applyCritClass(sel){
+    const td = sel.closest('td');
+    if(!td) return;
+    td.classList.remove('crit-baja','crit-media','crit-alta');
+    if(sel.value === 'baja') td.classList.add('crit-baja');
+    else if(sel.value === 'media') td.classList.add('crit-media');
+    else if(sel.value === 'alta') td.classList.add('crit-alta');
+  }
+  document.querySelectorAll('.criticidad-select').forEach(function(sel){
+    applyCritClass(sel);   // estado inicial
+    sel.addEventListener('change', function(){ applyCritClass(sel); });
+  });
+})();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>

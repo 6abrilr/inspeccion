@@ -69,12 +69,14 @@ if (!$inScope) {
 /* ===== Datos recibidos del formulario ===== */
 $estadoArr      = isset($_POST['estado'])      && is_array($_POST['estado'])      ? $_POST['estado']      : [];
 $obsArr         = isset($_POST['observacion']) && is_array($_POST['observacion']) ? $_POST['observacion'] : [];
+$criticidadArr  = isset($_POST['criticidad'])  && is_array($_POST['criticidad'])  ? $_POST['criticidad']  : [];
 $formKeyArr     = isset($_POST['form_key'])    && is_array($_POST['form_key'])    ? $_POST['form_key']    : [];
 $formValArr     = isset($_POST['form_val'])    && is_array($_POST['form_val'])    ? $_POST['form_val']    : [];
 
 /* ===== Archivos de evidencia ===== */
 $files = $_FILES['evidencia'] ?? null;
 
+/* ===== Asegurar tablas necesarias ===== */
 /* ===== Asegurar tablas necesarias ===== */
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -91,6 +93,13 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   UNIQUE KEY uq_file_row (file_rel,row_idx)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
+/* Migración suave: si la tabla ya existía sin 'caracter', la agregamos */
+try {
+  $pdo->exec("ALTER TABLE checklist ADD COLUMN caracter VARCHAR(100) NULL");
+} catch (Throwable $e) {
+  // si ya existe, ignoramos el error
+}
+
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
   id INT AUTO_INCREMENT PRIMARY KEY,
   file_rel VARCHAR(512) NOT NULL,
@@ -101,11 +110,36 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
   UNIQUE KEY uq_file_row_field (file_rel,row_idx,field_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
+/* Prepared statements para consultas/updates ===== */
+$stSelChecklist = $pdo->prepare("SELECT evidencia_path FROM checklist WHERE file_rel=? AND row_idx=?");
+$stInsertChecklist = $pdo->prepare("
+  INSERT INTO checklist (file_rel,row_idx,caracter,estado,observacion,evidencia_path,updated_at)
+  VALUES (?,?,?,?,?,?,NOW())
+");
+
+$stUpdateChecklist = $pdo->prepare("
+  UPDATE checklist
+     SET caracter = ?,
+         estado = ?,
+         observacion = ?,
+         evidencia_path = ?,
+         updated_at = NOW()
+   WHERE file_rel = ? AND row_idx = ?
+");
+
+$stUpsertForm = $pdo->prepare("
+  INSERT INTO checklist_form (file_rel,row_idx,field_key,field_value,updated_at)
+  VALUES (?,?,?,?,NOW())
+  ON DUPLICATE KEY UPDATE
+    field_value = VALUES(field_value),
+    updated_at = NOW()
+");
+
+
 /* ===== Determinar todos los row_idx a procesar ===== */
 $rowIds = [];
-
-// desde estado / observacion
-foreach ([$estadoArr, $obsArr, $formKeyArr, $formValArr] as $arr) {
+// desde estado / observacion / criticidad / formulario
+foreach ([$estadoArr, $obsArr, $criticidadArr, $formKeyArr, $formValArr] as $arr) {
   foreach ($arr as $k => $_) {
     $k = (int)$k;
     if ($k > 0) $rowIds[$k] = true;
@@ -132,17 +166,20 @@ if (!is_dir($evidBase)) {
 /* Prepared statements para consultas/updates ===== */
 $stSelChecklist = $pdo->prepare("SELECT evidencia_path FROM checklist WHERE file_rel=? AND row_idx=?");
 $stInsertChecklist = $pdo->prepare("
-  INSERT INTO checklist (file_rel,row_idx,estado,observacion,evidencia_path,updated_at)
-  VALUES (?,?,?,?,?,NOW())
+  INSERT INTO checklist (file_rel,row_idx,caracter,estado,observacion,evidencia_path,updated_at)
+  VALUES (?,?,?,?,?,?,NOW())
 ");
+
 $stUpdateChecklist = $pdo->prepare("
   UPDATE checklist
-     SET estado = ?,
+     SET caracter = ?,
+         estado = ?,
          observacion = ?,
          evidencia_path = ?,
          updated_at = NOW()
    WHERE file_rel = ? AND row_idx = ?
 ");
+
 
 $stUpsertForm = $pdo->prepare("
   INSERT INTO checklist_form (file_rel,row_idx,field_key,field_value,updated_at)
@@ -156,6 +193,13 @@ $stUpsertForm = $pdo->prepare("
 foreach ($rowIds as $idx) {
   $rowIdx = (int)$idx;
   if ($rowIdx <= 0) continue;
+
+    // Criticidad
+  $criticidad = $criticidadArr[$rowIdx] ?? '';
+  $criticidad = trim((string)$criticidad);
+  if ($criticidad === '') {
+    $criticidad = null; // se guarda como NULL si queda en "—"
+  }
 
   // Estado
   $estado = $estadoArr[$rowIdx] ?? '';
@@ -199,11 +243,12 @@ foreach ($rowIds as $idx) {
   // Insertar o actualizar checklist
   if ($rowDb) {
     // Ya existe fila → UPDATE
-    $stUpdateChecklist->execute([$estado, $obs, $evToSave, $file_rel, $rowIdx]);
+    $stUpdateChecklist->execute([$criticidad, $estado, $obs, $evToSave, $file_rel, $rowIdx]);
   } else {
     // No existe → INSERT
-    $stInsertChecklist->execute([$file_rel, $rowIdx, $estado, $obs, $evToSave]);
+    $stInsertChecklist->execute([$file_rel, $rowIdx, $criticidad, $estado, $obs, $evToSave]);
   }
+
 
   // Campos formulario (si vienen)
   if (isset($formKeyArr[$rowIdx])) {

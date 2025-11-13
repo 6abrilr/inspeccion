@@ -1,7 +1,14 @@
 <?php
 // public/index.php — Dashboard con 3 bloques: Global, Sistema activo, Críticos (chips por área/subcarpeta)
+declare(strict_types=1);
+
+require_once __DIR__ . '/../auth/bootstrap.php';
+require_login();
+
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/ui.php';
+
+$user = function_exists('current_user') ? current_user() : null;
 
 if (!function_exists('e')) {
   function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
@@ -209,7 +216,10 @@ if ($uses_areas) {
 
 ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
 ?>
-<link rel="stylesheet" href="./assets/css/theme-602.css">
+<link rel="stylesheet" href="../assets/css/theme-602.css">
+<link rel="icon" type="image/png" href="../assets/img/bcom602.png">
+
+
 <style>
   body{
     background: url("<?= e($IMG_BG) ?>") no-repeat center center fixed;
@@ -290,8 +300,25 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
       <div class="brand-title">Batallón de Comunicaciones 602</div>
       <div class="brand-sub">“Hogar de las Comunicaciones Fijas del Ejército”</div>
     </div>
+
+    <?php if ($user): ?>
+      <div class="ms-auto text-end" style="font-size:.9rem;">
+        <div>
+          <strong><?= e($user['rank'] ?? '') ?> <?= e($user['full_name'] ?? '') ?></strong>
+        </div>
+        <?php if (!empty($user['unit'])): ?>
+          <div class="text-muted"><?= e($user['unit']) ?></div>
+        <?php endif; ?>
+        <div>
+         <a href="../logout.php" class="btn btn-success btn-sm" style="font-weight: 700;">
+  Cerrar sesión
+</a>
+        </div>
+      </div>
+    <?php endif; ?>
   </div>
 </header>
+
 
 <div class="container">
   <nav class="tabs" aria-label="Filtro">

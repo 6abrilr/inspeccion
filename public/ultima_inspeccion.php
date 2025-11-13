@@ -73,7 +73,8 @@ $ESCUDO     = $ASSETS_URL . '/img/escudo_bcom602.png';
 <title>Batallón de Comunicaciones 602 – Última inspección</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-<link rel="stylesheet" href="assets/css/theme-602.css">
+<link rel="stylesheet" href="../assets/css/theme-602.css">
+<link rel="icon" type="image/png" href="../assets/img/bcom602.png">
 <style>
   body{
     background: url("<?= e($IMG_BG) ?>") no-repeat center center fixed;
@@ -118,7 +119,6 @@ $ESCUDO     = $ASSETS_URL . '/img/escudo_bcom602.png';
         <div class="brand-title">Batallón de Comunicaciones 602</div>
         <div class="brand-sub">“Hogar de las Comunicaciones Fijas del Ejército”</div>
       </div>
-      <div class="brand-year"><?= date('Y') ?></div>
     </div>
   </header>
 

@@ -13,6 +13,7 @@ function ui_header($title='Bitácora de Inspección', $opts=[]){
   <title><?= e($title) ?></title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="icon" type="image/png" href="../assets/img/bcom602.png">
   <style>
     body {
       background: radial-gradient(circle at 20% 30%, #1E2A52, #0E153A 80%);
@@ -28,7 +29,7 @@ function ui_header($title='Bitácora de Inspección', $opts=[]){
   <?php if($show_brand): ?>
   <header class="mb-4">
     <div class="d-flex align-items-center gap-3">
-      <img src="assets/img/logo.png" alt="Logo" height="60">
+      <img src="../assets/img/logo.png" alt="Logo" height="60">
       <div>
         <h4 class="m-0">Batallón de Comunicaciones 602</h4>
         <div class="text-light small">“Hogar de las Comunicaciones fijas del Ejército”</div>
