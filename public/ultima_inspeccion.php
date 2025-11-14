@@ -41,11 +41,11 @@ foreach ($it as $entry) {
  *   50) cualquier otro (en el medio, por si en el futuro agregás algo)
  */
 $priority = [
-  'Personal (S-1)'      => 1,
-  'Inteligencia (S-2)'  => 2,
-  'Operaciones (S-3)'   => 3,
-  'Materiales (S-4)'    => 4,
-  'Aspectos Generales'  => 999,
+  'Aspectos Generales'  => 1,
+  'Personal (S-1)'      => 2,
+  'Inteligencia (S-2)'  => 3,
+  'Operaciones (S-3)'   => 4,
+  'Materiales (S-4)'    => 999,
 ];
 
 uksort($tabsRaw, function(string $a, string $b) use ($priority){
