@@ -20,13 +20,45 @@ if ($sub !== '') {
   if ($try && str_starts_with($try, $baseDir)) $root = $try;
 }
 
-/* Tabs: todas las subcarpetas de primer nivel */
-$tabs = ['' => '(Todos)'];
+/* ===== Tabs: todas las subcarpetas de primer nivel ===== */
+$tabsRaw = []; // acá guardamos todas menos "(Todos)"
 $it = new DirectoryIterator($baseDir);
 foreach ($it as $entry) {
   if($entry->isDot()) continue;
-  if($entry->isDir()) $tabs[$entry->getFilename()] = $entry->getFilename();
+  if($entry->isDir()){
+    $name = $entry->getFilename();
+    $tabsRaw[$name] = $name;
+  }
 }
+
+/*
+ * Prioridad de orden:
+ *   1) Personal (S-1)
+ *   2) Inteligencia (S-2)
+ *   3) Operaciones (S-3)
+ *   4) Materiales (S-4)
+ *   999) Aspectos Generales (al final)
+ *   50) cualquier otro (en el medio, por si en el futuro agregás algo)
+ */
+$priority = [
+  'Personal (S-1)'      => 1,
+  'Inteligencia (S-2)'  => 2,
+  'Operaciones (S-3)'   => 3,
+  'Materiales (S-4)'    => 4,
+  'Aspectos Generales'  => 999,
+];
+
+uksort($tabsRaw, function(string $a, string $b) use ($priority){
+  $pa = $priority[$a] ?? 50;
+  $pb = $priority[$b] ?? 50;
+  if ($pa === $pb) {
+    return strcasecmp($a, $b); // si empatan, ordenar alfabéticamente
+  }
+  return $pa <=> $pb;
+});
+
+// armamos el array final de tabs, empezando por "(Todos)"
+$tabs = ['' => '(Todos)'] + $tabsRaw;
 
 /* ===== Recorrer archivos XLSX ===== */
 $rows=[];

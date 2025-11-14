@@ -2,25 +2,31 @@
 // public/save_check_bulk.php
 declare(strict_types=1);
 
-require_once __DIR__ . '/../auth/bootstrap.php'; // para sesión y require_login
+require_once __DIR__ . '/../auth/bootstrap.php';
 require_login();
-
 require_once __DIR__ . '/../config/db.php';
 
 function e($v){ return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 function starts_with($h,$n){ return substr($h,0,strlen($n)) === $n; }
 
+if (!function_exists('user_display_name')) {
+  function user_display_name(): string {
+    $u = $_SESSION['user'] ?? [];
+
+    if (isset($u['grado'], $u['arma'], $u['nombre_completo'])) {
+      return trim($u['grado'].' '.$u['arma'].' '.$u['nombre_completo']); // ST SCD Néstor Gabriel Rojas
+    }
+    if (isset($u['display_name']))    return trim((string)$u['display_name']);
+    if (isset($u['nombre_completo'])) return trim((string)$u['nombre_completo']);
+    if (isset($u['username']))        return strtoupper((string)$u['username']);
+
+    return 'Usuario';
+  }
+}
+
 ini_set('display_errors','1');
 ini_set('display_startup_errors','1');
 error_reporting(E_ALL);
-
-/* ===== Usuario que realiza la actualización ===== */
-/* Ajustá estos índices según cómo guardes el usuario en sesión */
-$updatedBy =
-    $_SESSION['user']['username']      // ej: usuario CPS
-    ?? $_SESSION['user']['display']    // ej: nombre mostrado
-    ?? $_SESSION['user']['name']       // ej: nombre completo
-    ?? 'usuario';
 
 /* ===== Verificar método ===== */
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -36,6 +42,7 @@ $showcolor = ($_POST['showcolor'] ?? '0') === '1';
 $perPage   = isset($_POST['pp'])   ? (int)$_POST['pp'] : 20;
 $page      = isset($_POST['page']) ? (int)$_POST['page'] : 1;
 $fmt       = $_POST['fmt'] ?? '';
+$area      = $_POST['area'] ?? '';   // <-- área/subcarpeta para volver con el mismo contexto
 
 if ($file_rel === '') {
   http_response_code(400);
@@ -77,6 +84,9 @@ if (!$inScope) {
   exit;
 }
 
+/* ===== Usuario que actualiza ===== */
+$updatedBy = user_display_name();
+
 /* ===== Datos recibidos del formulario ===== */
 $estadoArr      = isset($_POST['estado'])      && is_array($_POST['estado'])      ? $_POST['estado']      : [];
 $obsArr         = isset($_POST['observacion']) && is_array($_POST['observacion']) ? $_POST['observacion'] : [];
@@ -104,14 +114,9 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   UNIQUE KEY uq_file_row (file_rel,row_idx)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-/* Migración suave: si la tabla ya existía sin 'caracter' / 'updated_by', las agregamos */
-try {
-  $pdo->exec("ALTER TABLE checklist ADD COLUMN caracter VARCHAR(100) NULL");
-} catch (Throwable $e) { /* ignore */ }
-
-try {
-  $pdo->exec("ALTER TABLE checklist ADD COLUMN updated_by VARCHAR(100) NULL");
-} catch (Throwable $e) { /* ignore */ }
+/* Migración suave */
+try { $pdo->exec("ALTER TABLE checklist ADD COLUMN caracter VARCHAR(100) NULL"); } catch (Throwable $e) { /* ignore */ }
+try { $pdo->exec("ALTER TABLE checklist ADD COLUMN updated_by VARCHAR(100) NULL"); } catch (Throwable $e) { /* ignore */ }
 
 $pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -123,7 +128,7 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist_form (
   UNIQUE KEY uq_file_row_field (file_rel,row_idx,field_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-/* ===== Prepared statements ===== */
+/* Prepared statements */
 $stSelChecklist = $pdo->prepare("SELECT evidencia_path FROM checklist WHERE file_rel=? AND row_idx=?");
 
 $stInsertChecklist = $pdo->prepare("
@@ -133,12 +138,12 @@ $stInsertChecklist = $pdo->prepare("
 
 $stUpdateChecklist = $pdo->prepare("
   UPDATE checklist
-     SET caracter      = ?,
-         estado        = ?,
-         observacion   = ?,
-         evidencia_path= ?,
-         updated_at    = NOW(),
-         updated_by    = ?
+     SET caracter       = ?,
+         estado         = ?,
+         observacion    = ?,
+         evidencia_path = ?,
+         updated_at     = NOW(),
+         updated_by     = ?
    WHERE file_rel = ? AND row_idx = ?
 ");
 
@@ -158,19 +163,16 @@ foreach ([$estadoArr, $obsArr, $criticidadArr, $formKeyArr, $formValArr] as $arr
     if ($k > 0) $rowIds[$k] = true;
   }
 }
-
-// desde archivos
 if ($files && isset($files['name']) && is_array($files['name'])) {
   foreach ($files['name'] as $k => $_name) {
     $k = (int)$k;
     if ($k > 0) $rowIds[$k] = true;
   }
 }
-
 $rowIds = array_keys($rowIds);
 sort($rowIds);
 
-/* ===== Preparar directorio de evidencias ===== */
+/* ===== Directorio de evidencias ===== */
 $evidBase = $projectBase . '/storage/evidencias';
 if (!is_dir($evidBase)) {
   @mkdir($evidBase, 0775, true);
@@ -185,14 +187,14 @@ foreach ($rowIds as $idx) {
   $criticidad = $criticidadArr[$rowIdx] ?? '';
   $criticidad = trim((string)$criticidad);
   if ($criticidad === '') {
-    $criticidad = null; // se guarda como NULL si queda en "—"
+    $criticidad = null;
   }
 
   // Estado
   $estado = $estadoArr[$rowIdx] ?? '';
   $estado = trim((string)$estado);
   if ($estado !== 'si' && $estado !== 'no') {
-    $estado = null; // para guardar como NULL
+    $estado = null;
   }
 
   // Observación
@@ -213,10 +215,9 @@ foreach ($rowIds as $idx) {
       $safeName = preg_replace('/[^A-Za-z0-9_\-\.]/','_', pathinfo($origName, PATHINFO_FILENAME));
       if ($safeName === '') $safeName = 'evidencia';
       $finalName = $safeName . '_' . date('Ymd_His') . '_' . $rowIdx . ($ext ? '.'.$ext : '');
-      $destAbs   = $evidBase . '/' . $finalName;
+      $destAbs  = $evidBase . '/' . $finalName;
 
       if (is_uploaded_file($tmpName) && @move_uploaded_file($tmpName, $destAbs)) {
-        // ruta relativa desde el proyecto
         $newEvPath = 'storage/evidencias/' . $finalName;
       }
     }
@@ -229,27 +230,9 @@ foreach ($rowIds as $idx) {
 
   // Insertar o actualizar checklist
   if ($rowDb) {
-    // Ya existe fila → UPDATE
-    $stUpdateChecklist->execute([
-      $criticidad,
-      $estado,
-      $obs,
-      $evToSave,
-      $updatedBy,
-      $file_rel,
-      $rowIdx
-    ]);
+    $stUpdateChecklist->execute([$criticidad, $estado, $obs, $evToSave, $updatedBy, $file_rel, $rowIdx]);
   } else {
-    // No existe → INSERT
-    $stInsertChecklist->execute([
-      $file_rel,
-      $rowIdx,
-      $criticidad,
-      $estado,
-      $obs,
-      $evToSave,
-      $updatedBy
-    ]);
+    $stInsertChecklist->execute([$file_rel, $rowIdx, $criticidad, $estado, $obs, $evToSave, $updatedBy]);
   }
 
   // Campos formulario (si vienen)
@@ -262,6 +245,7 @@ foreach ($rowIds as $idx) {
   }
 }
 
+/* ===== Volver a ver_tabla con mismo contexto y flag de guardado ===== */
 /* ===== Volver a ver_tabla con mismo contexto ===== */
 $qs = 'p=' . rawurlencode($file_rel)
     . '&s=' . (int)$sheet
@@ -270,6 +254,15 @@ $qs = 'p=' . rawurlencode($file_rel)
 
 if ($showcolor) $qs .= '&showcolor=1';
 if ($fmt !== '') $qs .= '&fmt=' . rawurlencode($fmt);
+
+// arrastrar área si vino en el POST
+$areaPost = $_POST['area'] ?? '';
+if ($areaPost !== '') {
+    $qs .= '&area=' . rawurlencode($areaPost);
+}
+
+// flag para mostrar el toast
+$qs .= '&saved=1';
 
 header('Location: ver_tabla.php?' . $qs);
 exit;

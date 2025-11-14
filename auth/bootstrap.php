@@ -41,13 +41,11 @@ function current_user(): ?array {
 }
 
 // --- Requerir login ---
-function require_login(): void {
-    if (!current_user()) {
-        $next = $_SERVER['REQUEST_URI'] ?? '/';
-        $next = preg_replace('#[\r\n]#', '', $next);
-        $base = rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? ''), '/');
-        if ($base === '') $base = '';
-        header('Location: ' . $base . '/login.php?next=' . rawurlencode($next));
+function require_login() {
+    if (empty($_SESSION['user'])) {
+        $login = dirname($_SERVER['SCRIPT_NAME']) . "/../login.php?denied=1";
+        header("Location: $login");
         exit;
     }
 }
+

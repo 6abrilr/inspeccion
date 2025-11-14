@@ -1,5 +1,5 @@
 <?php
-// public/index.php — Dashboard con 3 bloques: Global, Sistema activo, Críticos (chips por área/subcarpeta)
+// public/index.php — Dashboard con sistema activo, Tareas críticas y barras por área
 declare(strict_types=1);
 
 require_once __DIR__ . '/../auth/bootstrap.php';
@@ -78,7 +78,7 @@ function kpi_from_like(PDO $pdo, string $like): array {
   return compact('tot','cumplidos','pend','porc','si','no','nr');
 }
 
-/* Global (todos los sistemas) */
+/* Global (todos los sistemas) - hoy no se muestra, pero queda por si lo querés usar después */
 function kpi_global_all(PDO $pdo): array {
   $likes = [
     "storage/ultima_inspeccion/%",
@@ -96,7 +96,7 @@ function kpi_global_all(PDO $pdo): array {
 }
 
 /* Sistema activo */
-$g_all    = kpi_global_all($pdo);
+$g_all    = kpi_global_all($pdo); // sin uso visual, pero no molesta
 $g_scope  = kpi_from_like($pdo, "storage/{$PREFIX}/%");
 $tot_controles = $g_scope['tot'];
 $tot_cumplidos = $g_scope['cumplidos'];
@@ -105,7 +105,7 @@ $porc_scope    = $g_scope['porc'];
 
 /* ===== Cumplimiento por área (sólo aplica a Listas) ===== */
 function kpi_por_area(PDO $pdo, string $prefix): array {
-  // Siempre devuelve S1..S4 aunque haya 0 filas, para que no falten S2/S4
+  // Siempre devuelve S1..S4 aunque haya 0 filas
   $base = ['S1'=>['controles'=>0,'cumplidos'=>0,'pendientes'=>0,'porc'=>0.0],
            'S2'=>['controles'=>0,'cumplidos'=>0,'pendientes'=>0,'porc'=>0.0],
            'S3'=>['controles'=>0,'cumplidos'=>0,'pendientes'=>0,'porc'=>0.0],
@@ -116,7 +116,7 @@ function kpi_por_area(PDO $pdo, string $prefix): array {
         WHEN file_rel LIKE 'storage/{$prefix}/S1/%' THEN 'S1'
         WHEN file_rel LIKE 'storage/{$prefix}/S2/%' THEN 'S2'
         WHEN file_rel LIKE 'storage/{$prefix}/S3/%' THEN 'S3'
-        WHEN file_rel LIKE 'storage/{$prefix}/S4/%' THEN 'S4'
+      WHEN file_rel LIKE 'storage/{$prefix}/S4/%' THEN 'S4'
       END AS area,
       COUNT(*) total,
       SUM(estado='si') si
@@ -138,10 +138,7 @@ function kpi_por_area(PDO $pdo, string $prefix): array {
   return $base;
 }
 
-/* ===== Chips de “Tareas críticas” por área/subcarpeta =====
-   - En Listas => S1..S4 con % y link a lista_de_control.php?area=SX
-   - En Última/Visitas => subcarpetas reales (token 3 del path) con % y link a su página (?sub=...)
-*/
+/* ===== Chips de “Tareas críticas” por área/subcarpeta ===== */
 function chips_criticos(PDO $pdo, string $scope, array $SCOPES): array {
   $prefix = $SCOPES[$scope]['prefix'];
   if ($scope === 'lista_de_control') {
@@ -219,7 +216,6 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
 <link rel="stylesheet" href="../assets/css/theme-602.css">
 <link rel="icon" type="image/png" href="../assets/img/bcom602.png">
 
-
 <style>
   body{
     background: url("<?= e($IMG_BG) ?>") no-repeat center center fixed;
@@ -257,21 +253,31 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
   .tab:hover{ background:rgba(255,255,255,.10) }
   .tab.active{ background:#16a34a; border-color:#16a34a; color:#08140c; }
 
-  .gauge{ --p:0; width:220px; height:220px; border-radius:999px;
-    background: radial-gradient(closest-side,#0e1116 76%,transparent 0 99.9%,#0e1116 0),
-               conic-gradient(var(--ok) calc(var(--p)*1%), #3a3f4a 0);
-    display:grid; place-items:center; margin:auto;
-    box-shadow: inset 0 0 0 10px #0f141c, 0 0 0 1px #2b3140, 0 10px 30px rgba(0,0,0,.35);
-  }
-  .gauge>.v{ font-weight:900; font-size:2.6rem; letter-spacing:.02em }
+/* Gauge  principal más grande (para que sea simétrico con el panel) */
+/* Gauge principal equilibrado */
+.gauge-sm{
+    --p:0;
+    width:250px;
+    height:250px;
+    border-radius:999px;
+    background:
+      radial-gradient(closest-side,#0e1116 70%,transparent 0 99.9%,#0e1116 0),
+      conic-gradient(var(--ok) calc(var(--p)*1%), #3a3f4a 0);
+    display:grid;
+    place-items:center;
+    margin: 0 auto;
+    box-shadow:
+      inset 0 0 0 12px #0f141c,
+      0 0 0 1px #2b3140,
+      0 14px 32px rgba(0,0,0,.5);
+}
 
-  .gauge-sm{ --p:0; width:180px; height:180px; border-radius:999px;
-    background: radial-gradient(closest-side,#0e1116 72%,transparent 0 99.9%,#0e1116 0),
-               conic-gradient(var(--ok) calc(var(--p)*1%), #3a3f4a 0);
-    display:grid; place-items:center; margin:auto;
-    box-shadow: inset 0 0 0 8px #0f141c, 0 0 0 1px #2b3140;
-  }
-  .gauge-sm .v{ font-weight:900; font-size:2.0rem }
+.gauge-sm .v{
+    font-weight:900;
+    font-size:3.4rem;
+    letter-spacing:.03em;
+}
+
 
   .chip{ display:inline-flex; align-items:center; gap:.5rem; padding:.45rem .7rem;
     border:1px solid rgba(255,255,255,.18); border-radius:999px; background:#0f1722; margin:.22rem;
@@ -310,15 +316,14 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
           <div class="text-muted"><?= e($user['unit']) ?></div>
         <?php endif; ?>
         <div>
-         <a href="../logout.php" class="btn btn-success btn-sm" style="font-weight: 700;">
-  Cerrar sesión
-</a>
+          <a href="../logout.php" class="btn btn-success btn-sm" style="font-weight: 700;">
+            Cerrar sesión
+          </a>
         </div>
       </div>
     <?php endif; ?>
   </div>
 </header>
-
 
 <div class="container">
   <nav class="tabs" aria-label="Filtro">
@@ -333,26 +338,16 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
 <div class="container">
   <div class="grid">
 
-    <!-- 1) Cumplimiento Global — TODOS LOS SISTEMAS -->
-    <div class="panel" style="grid-column: span 4;">
-      <h3 class="title">Cumplimiento Global — Todos los sistemas</h3>
-      <div class="gauge" style="--p: <?= (float)$g_all['porc'] ?>;"><div class="v"><?= (int)$g_all['porc'] ?>%</div></div>
-      <div class="mt-3 text-center muted">
-        Controles: <b><?= $g_all['tot'] ?></b> · Cumplidos: <b><?= $g_all['cumplidos'] ?></b> · Pendientes: <b><?= $g_all['pend'] ?></b>
-      </div>
-    </div>
-
-    <!-- 2) Cumplimiento del SISTEMA ACTIVO (sólo 1 gauge) -->
-    <div class="panel link" data-href="<?= e($DOC_URL) ?>" style="grid-column: span 5;">
-      <h3 class="title">Cumplimiento — <?= e($ACTIVE['label']) ?> (activo)</h3>
+    <!-- 1) Cumplimiento del SISTEMA ACTIVO (gauge principal) -->
+<div class="panel link" data-href="<?= e($DOC_URL) ?>" style="grid-column: span 7;">      <h3 class="title">Cumplimiento — <?= e($ACTIVE['label']) ?> (activo)</h3>
       <div class="gauge-sm" style="--p: <?= (float)$porc_scope ?>;"><div class="v"><?= (float)$porc_scope ?>%</div></div>
       <div class="mt-3 text-center muted">
         Controles: <b><?= $tot_controles ?></b> · Cumplidos: <b><?= $tot_cumplidos ?></b> · Pendientes: <b><?= $tot_pend ?></b>
       </div>
     </div>
 
-    <!-- 3) “Tareas críticas”: chips por Área/Subcarpeta (link a ingresar/editar) -->
-    <div class="panel" style="grid-column: span 3;">
+    <!-- 2) “Tareas críticas”: chips por Área/Subcarpeta (link a ingresar/editar) -->
+<div class="panel" style="grid-column: span 5;">
       <h3 class="title">Tareas Críticas — <?= e($ACTIVE['label']) ?></h3>
       <?php if (empty($chips)): ?>
         <div class="muted">No hay datos para este sistema.</div>
@@ -371,8 +366,8 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
       <?php endif; ?>
     </div>
 
-    <!-- Barras por área / única barra según scope -->
-    <div class="panel link" data-href="<?= e($DOC_URL) ?>" style="grid-column: span 7;">
+    <!-- 3) Barras por área / única barra según scope -->
+    <div class="panel link" data-href="<?= e($DOC_URL) ?>" style="grid-column: span 4;">
       <h3 class="title">Cumplimiento por Área</h3>
       <?php if ($uses_areas): ?>
         <div class="d-flex flex-column gap-2">
@@ -380,12 +375,11 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
             $aliases=['S1'=>'Personal (S-1)','S2'=>'Inteligencia (S-2)','S3'=>'Operaciones (S-3)','S4'=>'Material (S-4)'];
             foreach($table_rows as $r):
               $pct = $r['porc'];
-              $sig = ($pct>=90?'#16a34a':($pct>=75?'#f59e0b':'#ef4444'));
           ?>
           <div class="bar">
             <div class="label"><?= e($aliases[$r['label']] ?? $r['label']) ?></div>
             <div class="track"><div class="fill" style="width:<?= (float)$pct ?>%"></div></div>
-            <div class="pct" style="color:<?= $sig ?>"><?= $pct ?>%</div>
+            <div class="pct"><?= $pct ?>%</div>
           </div>
           <?php endforeach; ?>
         </div>
@@ -401,8 +395,8 @@ ui_header('PRESENTACION IGE', ['container'=>'xl', 'show_brand'=>false]);
       <?php endif; ?>
     </div>
 
-    <!-- Tabla resumen inferior -->
-    <div class="panel" style="grid-column: span 12;">
+    <!-- 4) Tabla resumen inferior -->
+    <div class="panel" style="grid-column: span 8 ;">
       <h3 class="title">Porcentaje de tareas realizadas — <?= e($ACTIVE['label']) ?></h3>
       <div class="table-responsive">
         <table class="tbl">

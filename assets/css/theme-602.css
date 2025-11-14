@@ -47,7 +47,7 @@ body{ margin:0; color:#e9eef5; background:#000; }
   position:fixed; right:-220px; top:-140px;
   width:1400px; height:900px;
   z-index:-1; opacity:var(--mesh-opacity);
-  background: url("../img/mesh-light.svg") no-repeat center/contain;
+  background: url("../img/fondo.png") no-repeat center/contain;
   mix-blend-mode:screen;
   filter: drop-shadow(0 0 36px rgba(124,196,255,.25));
   pointer-events:none;

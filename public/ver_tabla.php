@@ -14,12 +14,14 @@ function norm($s){ return preg_replace('/\s+/u','',mb_strtoupper(trim((string)$s
 $PUBLIC_URL = rtrim(str_replace('\\','/', dirname($_SERVER['SCRIPT_NAME'] ?? $_SERVER['PHP_SELF'])), '/');
 $APP_URL    = rtrim(str_replace('\\','/', dirname($PUBLIC_URL)), '/');
 $ASSETS_URL = ($APP_URL === '' ? '' : $APP_URL) . '/assets';
-$IMG_BG     = $ASSETS_URL . '/img/fondo.png';
+$IMG_BG     = $ASSETS_URL . '../assets/img/fondo.png';
 
 /* ===== Parámetros ===== */
 $rel = $_GET['p'] ?? '';
 $sheetIdx = isset($_GET['s']) ? max(0,(int)$_GET['s']) : 0;
 $debugShowColor = isset($_GET['showcolor']);
+$areaParam = $_GET['area'] ?? ''; // área / subcarpeta actual (para volver al listado)
+$savedFlag = ($_GET['saved'] ?? '') === '1'; // flag de guardado correcto
 
 /* Paginación */
 $allowedPP = [10,20,30,50,100];
@@ -52,6 +54,9 @@ $scopeMeta = [
 $SCOPE = $scopeMeta[$inScope];
 $isVisitas = ($inScope === 'visitas_de_estado_mayor');
 
+/* Tooltip de Acción Correctiva en VISITAS y ÚLTIMA INSPECCIÓN */
+$hasAccionTooltip = in_array($inScope, ['visitas_de_estado_mayor','ultima_inspeccion'], true);
+
 /* Ya no usamos “Carácter” del Excel como columna fija */
 $showCaracter = false;
 
@@ -73,6 +78,7 @@ if(isset($_GET['setmode'])){
   $up->execute([$rel,$modeSet]);
   $qs = 'p='.rawurlencode($rel).'&s='.$sheetIdx.($debugShowColor?'&showcolor=1':'')."&pp=$perPage&page=$page";
   if(isset($_GET['fmt'])) $qs .= '&fmt='.rawurlencode($_GET['fmt']);
+  if($areaParam !== '') $qs .= '&area='.rawurlencode($areaParam);
   header("Location: ver_tabla.php?".$qs); exit;
 }
 if(isset($_GET['setfmt'])){
@@ -82,6 +88,7 @@ if(isset($_GET['setfmt'])){
                        ON DUPLICATE KEY UPDATE table_fmt=VALUES(table_fmt), updated_at=NOW()");
   $up->execute([$rel,$fmtSet]);
   $qs = 'p='.rawurlencode($rel).'&s='.$sheetIdx.($debugShowColor?'&showcolor=1':'')."&pp=$perPage&page=$page";
+  if($areaParam !== '') $qs .= '&area='.rawurlencode($areaParam);
   header("Location: ver_tabla.php?".$qs); exit;
 }
 
@@ -193,8 +200,9 @@ else{
   else{ [$rows,$rowFill,$sheetNames,$err]=read_xlsx_all($abs,$sheetIdx,$sheetNames,$err); }
 }
 
-/* Copia cruda para tooltip de “Acción Correctiva” (solo VISITAS) */
+/* Copia cruda para tooltip de “Acción Correctiva” (VISITAS y ÚLTIMA INSPECCIÓN) */
 $rawRows = $rows;
+
 /* ===== Detección de encabezado real ===== */
 function looks_like_header(array $first): bool {
   $a = isset($first[0]) ? norm((string)$first[0]) : '';
@@ -245,8 +253,8 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS checklist (
   estado ENUM('si','no') NULL,
   observacion TEXT NULL,
   evidencia_path VARCHAR(512) NULL,
-  updated_at TIMESTAMP NULL,
-  updated_by VARCHAR(100) NULL,         -- NUEVO: usuario que modificó
+  updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by VARCHAR(100) NULL,
   UNIQUE KEY uq_file_row (file_rel,row_idx)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
@@ -293,7 +301,6 @@ $lastRow = $stUpd->fetch(PDO::FETCH_ASSOC) ?: null;
 $lastUpd = $lastRow['updated_at'] ?? null;
 $lastBy  = $lastRow['updated_by'] ?? null;
 
-
 /* ===== Construcción de listado visible + paginación ===== */
 $visible = [];
 $rowIndex=1; $lastSection=null;
@@ -306,11 +313,11 @@ foreach($rows as $i=>$r){
   }
   if($lastSection){ $visible[]=$lastSection; $lastSection=null; }
 
-  /* Tooltip de Acción Correctiva SOLO para VISITAS: 3ra col del Excel original */
+  /* Tooltip de Acción Correctiva (VISITAS / ÚLTIMA INSPECCIÓN): 3ra col del Excel original */
   $accion = '';
-  if ($isVisitas) {
+  if ($hasAccionTooltip) {
     $raw = $rawRows[$i] ?? [];
-    $accion = trim((string)($raw[2] ?? ''));
+    $accion = trim((string)($raw[2] ?? '')); // columna C
   }
 
   $saved = $prefill[$rowIndex] ?? ['caracter'=>'','estado'=>'','observacion'=>'','evidencia_path'=>''];
@@ -330,9 +337,16 @@ foreach($rows as $i=>$r){
 
 /* Estadísticas (solo datos) */
 $cSi=$cNo=$cNull=0;
-foreach($visible as $v){ if(!empty($v['section'])) continue; $sv=$v['estado']??''; if($sv==='si') $cSi++; elseif($sv==='no') $cNo++; else $cNull++; }
+foreach($visible as $v){
+  if(!empty($v['section'])) continue;
+  $sv=$v['estado']??'';
+  if($sv==='si') $cSi++;
+  elseif($sv==='no') $cNo++;
+  else $cNull++;
+}
 $mostradas = $cSi+$cNo+$cNull;
 $pct = $mostradas ? round($cSi*100.0/$mostradas,1) : 0.0;
+$pctInt = (int)round($pct);
 
 /* Paginación */
 $totalItems = 0; foreach($visible as $v){ if(empty($v['section'])) $totalItems++; }
@@ -353,11 +367,16 @@ for($i=0;$i<count($visible);$i++){
   $render[] = $v;
 }
 
-/* Helper QS base (arrastra formato) */
-function base_qs($rel,$sheetIdx,$debugShowColor,$perPage,$fmt){
-  return 'p='.rawurlencode($rel).'&s='.(int)$sheetIdx.($debugShowColor?'&showcolor=1':'').'&pp='.(int)$perPage.'&fmt='.rawurlencode($fmt);
+/* Helper QS base (arrastra formato + área) */
+function base_qs($rel,$sheetIdx,$debugShowColor,$perPage,$fmt,$areaParam){
+  $qs = 'p='.rawurlencode($rel).'&s='.(int)$sheetIdx.($debugShowColor?'&showcolor=1':'').'&pp='.(int)$perPage.'&fmt='.rawurlencode($fmt);
+  if($areaParam !== '') $qs .= '&area='.rawurlencode($areaParam);
+  return $qs;
 }
-$baseQS = base_qs($rel,$sheetIdx,$debugShowColor,$perPage,$tableFmt);
+$baseQS = base_qs($rel,$sheetIdx,$debugShowColor,$perPage,$tableFmt,$areaParam);
+
+/* Para botón Volver */
+$listBackUrl = $SCOPE['list_url'] . ($areaParam !== '' ? ('?area='.rawurlencode($areaParam)) : '');
 ?>
 <!doctype html>
 <html lang="es">
@@ -426,7 +445,7 @@ input[type="file"]{
 
 .brand-hero .brand-title{ color:#f3f7fb } .brand-hero .brand-sub{ color:#b9c6d8 }
 
-/* Tooltip Acción Correctiva (solo VISITAS) */
+/* Tooltip Acción Correctiva */
 .tip-wrap{ display:inline-flex; align-items:center; gap:.35rem }
 .tip-dot{ display:inline-flex; width:18px; height:18px; border-radius:999px; align-items:center; justify-content:center; font-size:.78rem; font-weight:900; color:#9CF3AC; background:#1b2a1e; border:1px solid #2a804c; cursor:help; user-select:none; outline:0; }
 .tip-box{ position:absolute; left: 1.2rem; top:50%; transform: translateY(-50%); background:#0b1220; color:#eaf2ff; border:1px solid rgba(255,255,255,.15);
@@ -437,7 +456,7 @@ input[type="file"]{
 /* Criticidad (celda bien visible) */
 .td-criticidad{
   position: relative;
-  transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease, color .15s ease;
+  transition: background-color .15s ease, border-color .15s.ease, box-shadow .15s ease, color .15s ease;
   border-left: 4px solid transparent;
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
 }
@@ -453,6 +472,41 @@ input[type="file"]{
 .td-criticidad.crit-baja{  background: linear-gradient(90deg, rgba(22,163,74,.92), rgba(22,163,74,.65));  border-left-color:#22c55e; color:#eafff3;  box-shadow: 0 0 0 1px rgba(22,163,74,.7); }
 .td-criticidad.crit-media{ background: linear-gradient(90deg, rgba(245,158,11,.95), rgba(245,158,11,.72)); border-left-color:#f59e0b; color:#1f1300; box-shadow: 0 0 0 1px rgba(245,158,11,.7); }
 .td-criticidad.crit-alta{  background: linear-gradient(90deg, rgba(239,68,68,.96), rgba(239,68,68,.78));  border-left-color:#ef4444; color:#fff5f5;  box-shadow: 0 0 0 1px rgba(239,68,68,.8); }
+
+/* Mini barra de progreso (arriba de la tabla) */
+.prog-mini{
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  min-width:190px;
+}
+.prog-mini-label{
+  font-size:.72rem;
+  font-weight:800;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  color:#9fb3c8;
+}
+.prog-mini-bar{
+  position:relative;
+  height:7px;
+  border-radius:999px;
+  background:rgba(15,23,42,.9);
+  overflow:hidden;
+  border:1px solid rgba(148,163,184,.6);
+}
+.prog-mini-fill{
+  position:absolute;
+  inset:0;
+  width:0;
+  border-radius:inherit;
+  background:linear-gradient(90deg,#22c55e,#16a34a);
+}
+.prog-mini-text{
+  font-size:.78rem;
+  font-weight:700;
+  color:#e5e7eb;
+}
 </style>
 </head>
 <body>
@@ -461,7 +515,7 @@ input[type="file"]{
 
 <header class="brand-hero">
   <div class="hero-inner container-fluid">
-<img class="brand-logo brand-logo-small" src="../assets/img/bcom602.png" alt="Escudo 602">
+    <img class="brand-logo brand-logo-small" src="../assets/img/bcom602.png" alt="Escudo 602">
     <div>
       <div class="brand-title">Batallón de Comunicaciones 602</div>
       <div class="brand-sub">“Hogar de las Comunicaciones Fijas del Ejército”</div>
@@ -469,17 +523,35 @@ input[type="file"]{
   </div>
 </header>
 
+<!-- Toast de confirmación de guardado -->
+<div class="position-fixed top-0 start-50 translate-middle-x p-3" style="z-index: 11000;">
+  <div id="saveToast" class="toast align-items-center text-bg-success border-0 shadow"
+       role="alert" aria-live="assertive" aria-atomic="true"
+       data-bs-delay="2500">
+    <div class="d-flex">
+      <div class="toast-body">
+        ✅ Cambios guardados correctamente.
+      </div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto"
+              data-bs-dismiss="toast" aria-label="Cerrar"></button>
+    </div>
+  </div>
+</div>
 
 <div class="page container-fluid">
 
   <!-- Toolbar superior -->
   <div class="d-flex align-items-center justify-content-between toolbar mb-3">
     <div class="left">
-      <a class="btnx btnx--muted" href="<?= e($SCOPE['list_url']) ?>" title="Volver al listado">📁 Volver</a>
+        <a
+          class="btnx btnx--muted"
+          href="<?= e($listBackUrl) ?>"
+          title="Volver al listado"
+          onclick="if (window.history.length > 1) { history.back(); return false; }"
+        >
+          📁 Volver
+        </a>
       <a class="btnx btnx--muted" href="index.php?scope=<?= e($SCOPE['dash_scope']) ?>" title="Ir al Dashboard">🏠 Dashboard</a>
-
-      <span class="badge-area">Origen: <b><?= e($SCOPE['label']) ?></b></span>
-      <span class="badge-area text-truncate" title="<?= e($rel) ?>">Archivo: <b><?= e(basename($rel)) ?></b></span>
       <?php if ($lastUpd): ?>
         <span class="badge-area">
           Última actualización:
@@ -490,6 +562,17 @@ input[type="file"]{
         </span>
       <?php endif; ?>
 
+      <?php if ($mostradas > 0): ?>
+        <div class="prog-mini">
+          <div class="prog-mini-label">Progreso tabla</div>
+          <div class="prog-mini-bar">
+            <div class="prog-mini-fill" style="width:<?= $pctInt ?>%;"></div>
+          </div>
+          <div class="prog-mini-text">
+            <?= $pctInt ?>% (<?= $cSi ?>/<?= $mostradas ?> ítems cumplidos)
+          </div>
+        </div>
+      <?php endif; ?>
 
       <?php if (!empty($sheetNames) && count($sheetNames)>1): ?>
         <form method="get" class="form-compact">
@@ -497,6 +580,10 @@ input[type="file"]{
           <?php if($debugShowColor): ?><input type="hidden" name="showcolor" value="1"><?php endif; ?>
           <input type="hidden" name="pp" value="<?= (int)$perPage ?>">
           <input type="hidden" name="page" value="<?= (int)$page ?>">
+          <input type="hidden" name="fmt" value="<?= e($tableFmt) ?>">
+          <?php if($areaParam !== ''): ?>
+            <input type="hidden" name="area" value="<?= e($areaParam) ?>">
+          <?php endif; ?>
           <label>Hoja:</label>
           <select name="s" class="form-select form-select-sm" onchange="this.form.submit()">
             <?php foreach($sheetNames as $i=>$nm): ?>
@@ -521,12 +608,12 @@ input[type="file"]{
           <?php if(!$debugShowColor): ?>
             <li><a class="dropdown-item" href="ver_tabla.php?<?= $baseQS ?>&page=<?= (int)$page ?>&showcolor=1">Ver color</a></li>
           <?php else: ?>
-            <li><a class="dropdown-item" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,false,$perPage,$tableFmt) ?>&page=<?= (int)$page ?>">Ocultar color</a></li>
+            <li><a class="dropdown-item" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,false,$perPage,$tableFmt,$areaParam) ?>&page=<?= (int)$page ?>">Ocultar color</a></li>
           <?php endif; ?>
           <li><hr class="dropdown-divider"></li>
           <li class="dropdown-header">Formato</li>
-          <li><a class="dropdown-item<?= $tableFmt==='classic'?' active':'' ?>" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,$debugShowColor,$perPage,'classic') ?>&setfmt=classic&page=<?= (int)$page ?>">Clásico</a></li>
-          <li><a class="dropdown-item<?= $tableFmt==='form'?' active':'' ?>" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,$debugShowColor,$perPage,'form') ?>&setfmt=form&page=<?= (int)$page ?>">Formulario (Predio/Dimensiones/...)</a></li>
+          <li><a class="dropdown-item<?= $tableFmt==='classic'?' active':'' ?>" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,$debugShowColor,$perPage,'classic',$areaParam) ?>&setfmt=classic&page=<?= (int)$page ?>">Clásico</a></li>
+          <li><a class="dropdown-item<?= $tableFmt==='form'?' active':'' ?>" href="ver_tabla.php?<?= base_qs($rel,$sheetIdx,$debugShowColor,$perPage,'form',$areaParam) ?>&setfmt=form&page=<?= (int)$page ?>">Formulario (Predio/Dimensiones/...)</a></li>
         </ul>
       </div>
 
@@ -547,6 +634,7 @@ input[type="file"]{
       <input type="hidden" name="s" value="<?= (int)$sheetIdx ?>">
       <?php if($debugShowColor): ?><input type="hidden" name="showcolor" value="1"><?php endif; ?>
       <?php if($tableFmt): ?><input type="hidden" name="fmt" value="<?= e($tableFmt) ?>"><?php endif; ?>
+      <?php if($areaParam !== ''): ?><input type="hidden" name="area" value="<?= e($areaParam) ?>"><?php endif; ?>
       <label>Ítems por página:</label>
       <select name="pp" class="form-select form-select-sm" onchange="this.form.submit()">
         <?php foreach($allowedPP as $pp): ?><option value="<?= $pp ?>" <?= $pp===$perPage?'selected':'' ?>><?= $pp ?></option><?php endforeach; ?>
@@ -589,6 +677,7 @@ input[type="file"]{
     <input type="hidden" name="pp" value="<?= (int)$perPage ?>">
     <input type="hidden" name="page" value="<?= (int)$page ?>">
     <input type="hidden" name="fmt" value="<?= e($tableFmt) ?>">
+    <input type="hidden" name="area" value="<?= e($areaParam) ?>">
 
     <div style="overflow:auto; max-height:72vh;">
       <table>
@@ -630,10 +719,10 @@ input[type="file"]{
               // Columna 1 (Nro)
               echo '<td>'.e($r[0] ?? '').'</td>';
 
-              // Columna 2 (Observaciones) + Tooltip SOLO VISITAS
+              // Columna 2 (Observaciones) + Tooltip (VISITAS / ÚLTIMA INSPECCIÓN)
               echo '<td>';
               echo e($r[1] ?? '');
-              if($isVisitas && $accion !== ''){
+              if($hasAccionTooltip && $accion !== ''){
                 echo '<span class="tip ms-1">';
                 echo '  <span class="tip-dot" tabindex="0" aria-label="Acción correctiva">i</span>';
                 echo '  <span class="tip-box"><b>Acción correctiva:</b><br>'.e($accion).'</span>';
@@ -684,6 +773,10 @@ input[type="file"]{
   </form>
 
 </div>
+
+<!-- Bootstrap JS primero -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
 <script>
 (function(){
   const form = document.getElementById('bulkForm');
@@ -749,8 +842,29 @@ input[type="file"]{
     applyCritClass(sel);   // estado inicial
     sel.addEventListener('change', function(){ applyCritClass(sel); });
   });
+
+  // Popup de confirmación de guardado (toast Bootstrap)
+  const wasSaved = <?= $savedFlag ? 'true' : 'false' ?>;
+  if (wasSaved && window.bootstrap) {
+    const toastEl = document.getElementById('saveToast');
+    if (toastEl) {
+      const toast = new bootstrap.Toast(toastEl);
+      toast.show();
+
+      // Limpiar el parámetro ?saved=1 de la URL para que no vuelva a saltar
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('saved');
+        window.history.replaceState({}, '', url);
+      } catch (e) {
+        // si falla, no pasa nada grave
+      }
+    }
+  }
+
 })();
 </script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
 </body>
 </html>
+s
